@@ -19,12 +19,12 @@ const RIVER_CROSSING_COST := 20.0
 ## Flat pairs of points (a0, b0, a1, b1, ...), each road segment drawn once.
 var points := PackedVector2Array()
 ## Cells that carry a road.
-var road_cells := {}
+var road_cells: Dictionary[int, bool] = {}
 ## Landmass id per cell (-1 for water); settlements share an id if connected by land.
 var landmass := PackedInt32Array()
 
 var _map: VoronoiMap
-var _drawn_edges := {}
+var _drawn_edges: Dictionary[int, bool] = {}
 
 
 func generate(map: VoronoiMap, settlements: Array[Dictionary], map_seed: int) -> void:
@@ -47,7 +47,7 @@ func generate(map: VoronoiMap, settlements: Array[Dictionary], map_seed: int) ->
 
 	# 2. Between factions: the closest pair of settlements per pair of
 	# factions, and only sometimes.
-	var best_pair := {}  # faction pair key -> {"i", "j", "d"}
+	var best_pair: Dictionary[int, Dictionary] = {}  # faction pair key -> {"i", "j", "d"}
 	for i in settlements.size():
 		for j in range(i + 1, settlements.size()):
 			var fi: int = settlements[i].faction
@@ -118,7 +118,7 @@ func _label_landmasses() -> PackedInt32Array:
 		label[start] = next_label
 		while not stack.is_empty():
 			var u: int = stack.pop_back()
-			for v in cells[u].neighbors:
+			for v: int in cells[u].neighbors:
 				if cells[v].is_land and label[v] < 0:
 					label[v] = next_label
 					stack.append(v)
@@ -140,7 +140,7 @@ func _route(from: int, to: int) -> Array[int]:
 	prev.resize(cells.size())
 	prev.fill(-1)
 
-	var heap := []
+	var heap: Array[Array] = []
 	dist[from] = 0.0
 	MinHeap.push(heap, [0.0, from])
 	while not heap.is_empty():
@@ -150,7 +150,7 @@ func _route(from: int, to: int) -> Array[int]:
 			break
 		if top[0] > dist[u]:
 			continue
-		for v in cells[u].neighbors:
+		for v: int in cells[u].neighbors:
 			if not cells[v].is_land:
 				continue
 			var nd: float = dist[u] + _step_cost(u, v)

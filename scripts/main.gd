@@ -58,9 +58,11 @@ const MAX_LOG_LINES := 8
 const ZOOM_MIN := 1.0
 const ZOOM_MAX := 4.0
 const ZOOM_STEP := 1.15
+const DRAG_THRESHOLD := 4.0  # pixels of mouse travel before a panel drag starts
+const GRIP_SIZE := 14.0
 const PAN_SPEED := 600.0  # screen pixels per second
 
-var layers := {}
+var layers: Dictionary[StringName, bool] = {}
 var camera := Camera2D.new()
 var overlay := Control.new()  # holds the screen-space panels, unaffected by the camera
 var legend_panel := PanelContainer.new()
@@ -71,6 +73,13 @@ var traders := Traders.new()
 var actions := FactionActions.new()
 var trader_view := TraderView.new()
 var clock_panel := PanelContainer.new()
+var layers_panel := PanelContainer.new()
+var panel_homes: Dictionary[PanelContainer, Callable] = {}  # PanelContainer -> Callable returning its default position
+var panel_offsets: Dictionary[PanelContainer, Vector2] = {}  # PanelContainer -> Vector2 the user dragged it away from home
+var panel_grips: Dictionary[PanelContainer, Control] = {}  # PanelContainer -> its resize grip
+var resize_mouse := Vector2.ZERO  # mouse position when a grip was pressed
+var resize_size := Vector2.ZERO  # panel size when a grip was pressed
+var drag_distance := 0.0  # mouse travel since the last press on a panel
 var date_label := Label.new()
 var pause_button := Button.new()
 var legend_list: VBoxContainer
@@ -87,14 +96,14 @@ func _ready() -> void:
 	camera.position = map.size * 0.5
 	add_child(camera)
 	trader_view.traders = traders
-	trader_view.hover_changed.connect(func(over: bool):
+	trader_view.hover_changed.connect(func(over: bool) -> void:
 		trader_hovered = over
 		queue_redraw())
 	trader_view.settlements = civ.settlements
 	add_child(trader_view)
 	clock.hour_passed.connect(_on_hour_passed)
 	clock.day_passed.connect(actions.on_day)
-	clock.day_passed.connect(func(): Production.collect_daily(map, civ.settlements))
+	clock.day_passed.connect(func() -> void: Production.collect_daily(map, civ.settlements))
 	actions.changed.connect(_on_world_changed)
 	actions.action_taken.connect(_log)
 	_build_ui()
@@ -109,8 +118,7 @@ func _build_ui() -> void:
 	add_child(ui)
 
 	# Layer toggles, top-left.
-	var layers_panel := PanelContainer.new()
-	layers_panel.position = Vector2(8, 8)
+	_make_draggable(layers_panel, func() -> Vector2: return Vector2(8, 8))
 	var layer_list := _make_collapsible(layers_panel, "Layers")
 	# Tight padding so the checkboxes pack closely.
 	var tight := StyleBoxEmpty.new()
@@ -118,23 +126,25 @@ func _build_ui() -> void:
 	tight.content_margin_right = 2
 	tight.content_margin_top = 1
 	tight.content_margin_bottom = 1
-	for layer in LAYERS:
+	for layer: Array in LAYERS:
 		layers[layer[0]] = true
 		var check := CheckBox.new()
 		check.text = layer[1]
 		check.button_pressed = true
 		check.focus_mode = Control.FOCUS_NONE  # keep Space/Enter for "new world"
-		check.add_theme_font_size_override("font_size", PANEL_FONT_SIZE)
-		for state in ["normal", "pressed", "hover", "hover_pressed", "focus"]:
+		_set_font(check)
+		for state: String in ["normal", "pressed", "hover", "hover_pressed", "focus"]:
 			check.add_theme_stylebox_override(state, tight)
 		check.toggled.connect(_on_layer_toggled.bind(layer[0]))
 		layer_list.add_child(check)
 	overlay.add_child(layers_panel)
+	_place_panel(layers_panel)
 
 	_build_clock_panel()
 	overlay.add_child(clock_panel)
 
 	# Event log, bottom-left.
+	_make_draggable(log_panel, func() -> Vector2: return Vector2(8.0, overlay.size.y - log_panel.size.y - 8.0))
 	log_panel.resized.connect(_place_log)
 	overlay.resized.connect(_place_log)
 	log_list = _make_collapsible(log_panel, "Event log")
@@ -142,30 +152,36 @@ func _build_ui() -> void:
 
 	# Faction summary, top-right; re-pinned to the right edge whenever its size
 	# (or the window's) changes.
+	_make_draggable(legend_panel, func() -> Vector2: return Vector2(overlay.size.x - legend_panel.size.x - 8.0, 8.0))
 	legend_panel.resized.connect(_place_legend)
 	overlay.resized.connect(_place_legend)
 	legend_list = _make_collapsible(legend_panel, "Factions")
 	overlay.add_child(legend_panel)
 
+	# Grips must come after their panels in the tree, or the panels get the click.
+	for grip: Control in panel_grips.values():
+		overlay.move_child(grip, -1)
+
 
 ## Date, pause button and speed slider, bottom-center.
 func _build_clock_panel() -> void:
 	clock_panel.mouse_entered.connect(_clear_hover)
+	_make_draggable(clock_panel, func() -> Vector2: return Vector2((overlay.size.x - clock_panel.size.x) * 0.5, overlay.size.y - clock_panel.size.y - 8.0))
 	clock_panel.resized.connect(_place_clock)
 	overlay.resized.connect(_place_clock)
 	var box := VBoxContainer.new()
 	clock_panel.add_child(box)
 
-	date_label.add_theme_font_size_override("font_size", PANEL_FONT_SIZE + 2)
+	_set_font(date_label, 2)
 	date_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(date_label)
 
 	var row := HBoxContainer.new()
 	box.add_child(row)
 	pause_button.focus_mode = Control.FOCUS_NONE  # Space is the pause hotkey
-	pause_button.custom_minimum_size.x = 60
-	pause_button.add_theme_font_size_override("font_size", PANEL_FONT_SIZE)
-	pause_button.pressed.connect(func(): _set_paused(not clock.paused))
+	_set_min_size(pause_button, Vector2(60, 0))
+	_set_font(pause_button)
+	pause_button.pressed.connect(func() -> void: _set_paused(not clock.paused))
 	row.add_child(pause_button)
 
 	var slider := HSlider.new()
@@ -174,13 +190,14 @@ func _build_clock_panel() -> void:
 	slider.step = 1
 	slider.value = clock.hours_per_second
 	slider.focus_mode = Control.FOCUS_NONE
-	slider.custom_minimum_size.x = 140
+	_set_min_size(slider, Vector2(140, 0))
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL  # takes up extra width
 	slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	row.add_child(slider)
 
 	var speed_label := Label.new()
-	speed_label.custom_minimum_size.x = 76
-	speed_label.add_theme_font_size_override("font_size", PANEL_FONT_SIZE)
+	_set_min_size(speed_label, Vector2(76, 0))
+	_set_font(speed_label)
 	row.add_child(speed_label)
 	var update_speed := func(v: float) -> void:
 		clock.hours_per_second = v
@@ -209,23 +226,24 @@ func _update_date_label() -> void:
 
 
 func _place_clock() -> void:
-	clock_panel.position = Vector2((overlay.size.x - clock_panel.size.x) * 0.5, overlay.size.y - clock_panel.size.y - 8.0)
+	_place_panel(clock_panel)
 
 
 func _place_log() -> void:
-	log_panel.position = Vector2(8.0, overlay.size.y - log_panel.size.y - 8.0)
+	_place_panel(log_panel)
 
 
 ## Appends a dated line to the event log, dropping the oldest beyond the limit.
 func _log(text: String) -> void:
 	var label := Label.new()
 	label.text = "%s  %s" % [clock.short_text(), text]
-	label.add_theme_font_size_override("font_size", PANEL_FONT_SIZE)
+	_set_font(label)
 	log_list.add_child(label)
 	while log_list.get_child_count() > MAX_LOG_LINES:
 		var oldest := log_list.get_child(0)
 		log_list.remove_child(oldest)
 		oldest.queue_free()
+	_apply_font_delta(log_panel)
 	_resize_log.call_deferred()
 
 
@@ -235,7 +253,120 @@ func _resize_log() -> void:
 
 
 func _place_legend() -> void:
-	legend_panel.position = Vector2(overlay.size.x - legend_panel.size.x - 8.0, 8.0)
+	_place_panel(legend_panel)
+
+
+## Lets `panel` be dragged by its background. `home` gives the panel's default
+## position; dragging stores an offset from it, so the panel keeps tracking its
+## edge as it resizes.
+func _make_draggable(panel: PanelContainer, home: Callable) -> void:
+	panel_homes[panel] = home
+	panel.gui_input.connect(_on_panel_gui_input.bind(panel))
+	panel.resized.connect(_place_panel.bind(panel))  # keep it on screen as it grows
+
+	# Resize grip in the bottom-right corner. It lives in the overlay, above the
+	# panel, because the panel's own children would swallow clicks there.
+	var grip := Control.new()
+	grip.custom_minimum_size = Vector2.ONE * GRIP_SIZE
+	grip.size = grip.custom_minimum_size
+	grip.z_index = 1
+	grip.mouse_default_cursor_shape = Control.CURSOR_FDIAGSIZE
+	grip.mouse_entered.connect(_clear_hover)
+	grip.gui_input.connect(_on_grip_gui_input.bind(panel))
+	grip.draw.connect(func() -> void:
+		var c := Color(1, 1, 1, 0.5)
+		for i: float in [4.0, 8.0, 12.0]:
+			grip.draw_line(Vector2(GRIP_SIZE - 1, GRIP_SIZE - i), Vector2(GRIP_SIZE - i, GRIP_SIZE - 1), c))
+	# Hidden while the panel is hidden or collapsed: over a collapsed panel the
+	# grip would cover its heading button and swallow the click that expands it.
+	panel.visibility_changed.connect(func() -> void: grip.visible = panel.visible and not panel.get_meta(&"collapsed", false))
+	panel_grips[panel] = grip
+	overlay.add_child(grip)
+
+
+func _on_panel_gui_input(event: InputEvent, panel: PanelContainer) -> void:
+	var click := event as InputEventMouseButton
+	var motion := event as InputEventMouseMotion
+	if click and click.button_index == MOUSE_BUTTON_LEFT and click.pressed:
+		drag_distance = 0.0
+	elif motion and motion.button_mask & MOUSE_BUTTON_MASK_LEFT:
+		drag_distance += motion.relative.length()
+		if drag_distance >= DRAG_THRESHOLD:
+			var home: Vector2 = panel_homes[panel].call()
+			panel_offsets[panel] = _clamp_to_overlay(panel, panel.position + motion.relative) - home
+			_place_panel(panel)
+
+
+## Puts `panel` at its home position plus any drag offset, kept on screen.
+func _place_panel(panel: PanelContainer) -> void:
+	var home: Vector2 = panel_homes[panel].call()
+	panel.position = _clamp_to_overlay(panel, home + panel_offsets.get(panel, Vector2.ZERO))
+	panel_grips[panel].position = panel.position + panel.size - Vector2.ONE * GRIP_SIZE
+
+
+## Resizes `panel` as its grip is dragged. It can't get smaller than its
+## contents need, nor extend past the window. The top-left corner stays put.
+func _on_grip_gui_input(event: InputEvent, panel: PanelContainer) -> void:
+	var click := event as InputEventMouseButton
+	var motion := event as InputEventMouseMotion
+	if click and click.button_index == MOUSE_BUTTON_LEFT and click.pressed:
+		resize_mouse = click.global_position
+		resize_size = panel.size
+	elif motion and motion.button_mask & MOUSE_BUTTON_MASK_LEFT:
+		var corner := panel.position
+		var wanted := resize_size + motion.global_position - resize_mouse
+		wanted = wanted.min(overlay.size - corner)
+		# Shrink the text a couple of points before the panel hits its minimum.
+		for delta: int in [0, -1, -2, -3, -4, -5]:
+			_set_font_delta(panel, delta)
+			panel.custom_minimum_size = Vector2.ZERO  # so the contents' own minimum shows
+			if panel.get_combined_minimum_size().x <= wanted.x and panel.get_combined_minimum_size().y <= wanted.y:
+				break
+		wanted = wanted.max(panel.get_combined_minimum_size())
+		panel.custom_minimum_size = wanted
+		panel.size = wanted
+		panel_offsets[panel] = corner - (panel_homes[panel].call() as Vector2)  # undo the edge pinning
+		_place_panel(panel)
+
+
+func _clamp_to_overlay(panel: PanelContainer, pos: Vector2) -> Vector2:
+	var max_pos := (overlay.size - panel.size).max(Vector2.ZERO)
+	return pos.clamp(Vector2.ZERO, max_pos)
+
+
+## Sets a panel text size and remembers it, so `_apply_font_delta` can shrink it.
+func _set_font(control: Control, extra := 0) -> void:
+	control.set_meta(&"font_extra", extra)
+	control.add_theme_font_size_override("font_size", PANEL_FONT_SIZE + extra)
+
+
+## Sets a minimum size that shrinks along with the panel's text.
+func _set_min_size(control: Control, base: Vector2) -> void:
+	control.set_meta(&"base_min_size", base)
+	control.custom_minimum_size = base
+
+
+## Text in `panel` is drawn `delta` points smaller (0 or negative).
+func _set_font_delta(panel: PanelContainer, delta: int) -> void:
+	panel.set_meta(&"font_delta", delta)
+	_apply_font_delta(panel)
+
+
+## Applies the panel's text shrink to its text, and the same proportion to
+## its tagged minimum sizes and spacing.
+func _apply_font_delta(panel: PanelContainer) -> void:
+	var delta: int = panel.get_meta(&"font_delta", 0)
+	var scale := float(PANEL_FONT_SIZE + delta) / PANEL_FONT_SIZE
+	var pending: Array[Node] = [panel]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		pending.append_array(node.get_children())
+		if node is Control and node.has_meta(&"base_min_size"):
+			node.custom_minimum_size = (node.get_meta(&"base_min_size") as Vector2) * scale
+		if node is Control and node.has_meta(&"base_separation"):
+			node.add_theme_constant_override("separation", roundi(node.get_meta(&"base_separation") * scale))
+		if node is Control and node.has_meta(&"font_extra"):
+			node.add_theme_font_size_override("font_size", PANEL_FONT_SIZE + node.get_meta(&"font_extra") + delta)
 
 
 ## Fills `panel` with a heading button that shows/hides a list. Returns the
@@ -249,16 +380,24 @@ func _make_collapsible(panel: PanelContainer, title_text: String) -> VBoxContain
 	title.flat = true
 	title.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	title.focus_mode = Control.FOCUS_NONE
-	title.add_theme_font_size_override("font_size", PANEL_FONT_SIZE)
+	_set_font(title)
 	box.add_child(title)
+	title.gui_input.connect(_on_panel_gui_input.bind(panel))  # drag by the heading too
 	var list := VBoxContainer.new()
 	list.add_theme_constant_override("separation", 0)
 	box.add_child(list)
 	var set_open := func(open: bool) -> void:
 		list.visible = open
+		panel.set_meta(&"collapsed", not open)
+		if panel_grips.has(panel):
+			panel_grips[panel].visible = panel.visible and open
+		panel.custom_minimum_size = Vector2.ZERO  # forget a user-set size
+		_set_font_delta(panel, 0)
 		title.text = ("▼ " if open else "▶ ") + title_text
 		panel.reset_size.call_deferred()  # shrink the panel to fit
-	title.pressed.connect(func(): set_open.call(not list.visible))
+	title.pressed.connect(func() -> void:
+		if drag_distance < DRAG_THRESHOLD:  # a drag, not a click
+			set_open.call(not list.visible))
 	set_open.call(true)
 	return list
 
@@ -270,16 +409,18 @@ func _rebuild_legend() -> void:
 	for f in civ.factions:
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 4)
+		row.set_meta(&"base_separation", 4)
 		var swatch := ColorRect.new()
 		swatch.color = f.color
-		swatch.custom_minimum_size = Vector2(10, 10)
+		_set_min_size(swatch, Vector2(10, 10))
 		swatch.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		row.add_child(swatch)
 		var label := Label.new()
 		label.text = "%s (%d settlements)" % [f.name, f.settlements.size()]
-		label.add_theme_font_size_override("font_size", PANEL_FONT_SIZE)
+		_set_font(label)
 		row.add_child(label)
 		legend_list.add_child(row)
+	_apply_font_delta(legend_panel)
 	legend_panel.reset_size.call_deferred()
 	_place_legend.call_deferred()
 
@@ -381,16 +522,18 @@ func _process(delta: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventMouseMotion:
+	var motion := event as InputEventMouseMotion
+	var click := event as InputEventMouseButton
+	if motion:
 		if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or Input.is_mouse_button_pressed(MOUSE_BUTTON_MIDDLE):
-			camera.position -= event.relative / camera.zoom.x
+			camera.position -= motion.relative / camera.zoom.x
 			_clamp_camera()
 		_update_hover()
-	elif event is InputEventMouseButton and event.pressed:
-		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			_zoom_at(event.position, ZOOM_STEP)
-		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			_zoom_at(event.position, 1.0 / ZOOM_STEP)
+	elif click and click.pressed:
+		if click.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_zoom_at(click.position, ZOOM_STEP)
+		elif click.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_zoom_at(click.position, 1.0 / ZOOM_STEP)
 
 
 ## Zooms by `factor`, keeping the world point under `screen_pos` fixed.
@@ -480,9 +623,10 @@ func _cell_at(pos: Vector2) -> int:
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
-	if not event.pressed or event.echo:
+	var key := event as InputEventKey
+	if key == null or not key.pressed or key.echo:
 		return
-	match event.keycode:
+	match key.keycode:
 		KEY_SPACE:
 			_set_paused(not clock.paused)
 		KEY_ENTER, KEY_R:

@@ -60,7 +60,7 @@ func _build_cells(sites: PackedVector2Array) -> Array[Dictionary]:
 		neighbor_sets.append({})
 
 	for t in range(0, tris.size(), 3):
-		var ids := [tris[t], tris[t + 1], tris[t + 2]]
+		var ids: Array[int] = [tris[t], tris[t + 1], tris[t + 2]]
 		var cc: Variant = _circumcenter(points[ids[0]], points[ids[1]], points[ids[2]])
 		for k in 3:
 			var a: int = ids[k]
@@ -87,7 +87,7 @@ func _build_cells(sites: PackedVector2Array) -> Array[Dictionary]:
 		var clipped := Geometry2D.intersect_polygons(PackedVector2Array(sorted), border)
 		var final_poly: PackedVector2Array = clipped[0] if clipped.size() > 0 else PackedVector2Array(sorted)
 		var neighbors: Array[int] = []
-		for k in neighbor_sets[i]:
+		for k: int in neighbor_sets[i]:
 			neighbors.append(k)
 		result.append({
 			"site": site,
@@ -226,12 +226,12 @@ func _generate_rivers(map_seed: int) -> void:
 ## existing river (last cell is a river cell), or [] if the river dead-ends.
 func _trace_river(start: int) -> Array[int]:
 	var path: Array[int] = [start]
-	var visited := {start: true}
+	var visited: Dictionary[int, bool] = {start: true}
 	var cur := start
 	while path.size() < 300:
 		var best := -1
 		var best_elev := INF
-		for nb in cells[cur].neighbors:
+		for nb: int in cells[cur].neighbors:
 			if visited.has(nb):
 				continue
 			if not cells[nb].is_land:

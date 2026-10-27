@@ -10,7 +10,7 @@ static func push(heap: Array, item: Array) -> void:
 		var parent := (i - 1) / 2
 		if heap[parent][0] <= heap[i][0]:
 			break
-		var tmp = heap[parent]
+		var tmp: Array = heap[parent]
 		heap[parent] = heap[i]
 		heap[i] = tmp
 		i = parent
@@ -32,7 +32,7 @@ static func pop(heap: Array) -> Array:
 				m = r
 			if m == i:
 				break
-			var tmp = heap[m]
+			var tmp: Array = heap[m]
 			heap[m] = heap[i]
 			heap[i] = tmp
 			i = m

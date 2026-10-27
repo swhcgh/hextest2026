@@ -111,7 +111,7 @@ func _depart(t: Dictionary) -> void:
 			options.append(i)
 	if options.is_empty():
 		return
-	options.sort_custom(func(a, b): return here.distance_squared_to(_site(a)) < here.distance_squared_to(_site(b)))
+	options.sort_custom(func(a: int, b: int) -> bool: return here.distance_squared_to(_site(a)) < here.distance_squared_to(_site(b)))
 	if options.size() > NEAREST_CANDIDATES:
 		options.resize(NEAREST_CANDIDATES)
 	if options.size() > 1:
@@ -135,7 +135,7 @@ func _arrive(t: Dictionary) -> void:
 	t.path = [] as Array[int]
 	t.rest = REST_HOURS
 	var stock: Dictionary = _settlements[t.at].stock
-	for r in t.cargo:
+	for r: StringName in t.cargo:
 		stock[r] += t.cargo[r]
 	t.cargo = {}
 	_load(t, t.at)
@@ -152,8 +152,8 @@ func _load(t: Dictionary, settlement: int) -> void:
 	for r in TownResources.RESOURCES:
 		if stock[r] >= 2:
 			goods.append(r)
-	goods.sort_custom(func(a, b): return stock[a] > stock[b])
-	for r in goods.slice(0, GOODS_PER_TRIP):
+	goods.sort_custom(func(a: StringName, b: StringName) -> bool: return stock[a] > stock[b])
+	for r: StringName in goods.slice(0, GOODS_PER_TRIP):
 		var amount := mini(LOAD_PER_GOOD, stock[r] / 2)
 		stock[r] -= amount
 		t.cargo[r] = t.cargo.get(r, 0) + amount

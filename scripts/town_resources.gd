@@ -24,7 +24,7 @@ static func generate(map: VoronoiMap, settlements: Array[Dictionary], map_seed: 
 ## Fills in one settlement's starting stock: a few weeks of what the land
 ## around it produces (see Production).
 static func generate_one(map: VoronoiMap, s: Dictionary, rng: RandomNumberGenerator) -> void:
-	var total := {}
+	var total: Dictionary[StringName, float] = {}
 	for r in RESOURCES:
 		total[r] = 0.0
 	for i in _surroundings(map.cells, s.cell):
@@ -32,7 +32,7 @@ static func generate_one(map: VoronoiMap, s: Dictionary, rng: RandomNumberGenera
 			total[r] += map.cells[i].production[r]
 
 	var size_mult := CITY_MULTIPLIER if s.kind == &"city" else 1.0
-	var stock := {}
+	var stock: Dictionary[StringName, int] = {}
 	for r in RESOURCES:
 		stock[r] = int(round(total[r] * STOCK_SCALE * size_mult * rng.randf_range(0.7, 1.3)))
 	# Gold is coin as much as ore: every settlement holds some.
@@ -44,12 +44,12 @@ static func generate_one(map: VoronoiMap, s: Dictionary, rng: RandomNumberGenera
 
 ## The cell and everything within RING_DEPTH neighbor-steps of it.
 static func _surroundings(cells: Array[Dictionary], start: int) -> Array[int]:
-	var seen := {start: true}
+	var seen: Dictionary[int, bool] = {start: true}
 	var frontier: Array[int] = [start]
 	for depth in RING_DEPTH:
 		var next: Array[int] = []
 		for u in frontier:
-			for v in cells[u].neighbors:
+			for v: int in cells[u].neighbors:
 				if not seen.has(v):
 					seen[v] = true
 					next.append(v)

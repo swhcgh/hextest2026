@@ -85,12 +85,12 @@ func on_day() -> void:
 func _expand(f: int) -> Result:
 	var cells := _map.cells
 	var own := 0
-	var frontier := {}
+	var frontier: Dictionary[int, bool] = {}
 	for i in cells.size():
 		if _civ.cell_faction[i] != f:
 			continue
 		own += 1
-		for nb in cells[i].neighbors:
+		for nb: int in cells[i].neighbors:
 			if cells[nb].is_land and _civ.cell_faction[nb] < 0:
 				frontier[nb] = true
 	if own >= _max_cells or frontier.is_empty():
@@ -103,7 +103,7 @@ func _expand(f: int) -> Result:
 	for i in frontier:
 		var cell := cells[i]
 		var nearest := INF
-		for s in _civ.factions[f].settlements:
+		for s: int in _civ.factions[f].settlements:
 			nearest = minf(nearest, cell.site.distance_to(cells[_civ.settlements[s].cell].site))
 		var score: float = Civilization.BIOME_SETTLE_SCORE.get(cell.biome, 0.1) \
 				+ (0.3 if cell.river else 0.0) - nearest / (_cell_size * 6.0) + _rng.randf() * 0.3
@@ -169,17 +169,17 @@ func _found_town(f: int) -> Result:
 
 
 func _scaled_cost(cost: Dictionary, factor: float) -> Dictionary:
-	var scaled := {}
-	for r in cost:
+	var scaled: Dictionary[StringName, int] = {}
+	for r: StringName in cost:
 		scaled[r] = ceili(cost[r] * factor)
 	return scaled
 
 
 ## Whether the faction's settlements together hold the whole cost.
 func _can_afford(f: int, cost: Dictionary) -> bool:
-	for r in cost:
+	for r: StringName in cost:
 		var held := 0
-		for s in _civ.factions[f].settlements:
+		for s: int in _civ.factions[f].settlements:
 			held += _civ.settlements[s].stock[r]
 		if held < cost[r]:
 			return false
@@ -188,11 +188,12 @@ func _can_afford(f: int, cost: Dictionary) -> bool:
 
 ## Takes the cost from the faction's settlements, richest first per good.
 func _pay(f: int, cost: Dictionary) -> void:
-	for r in cost:
-		var owners: Array = _civ.factions[f].settlements.duplicate()
-		owners.sort_custom(func(a, b): return _civ.settlements[a].stock[r] > _civ.settlements[b].stock[r])
+	for r: StringName in cost:
+		var owners: Array[int] = []
+		owners.assign(_civ.factions[f].settlements)
+		owners.sort_custom(func(a: int, b: int) -> bool: return _civ.settlements[a].stock[r] > _civ.settlements[b].stock[r])
 		var left: int = cost[r]
-		for s in owners:
+		for s: int in owners:
 			var stock: Dictionary = _civ.settlements[s].stock
 			var take := mini(left, stock[r])
 			stock[r] -= take
@@ -205,7 +206,7 @@ func _nearest_own_settlement(f: int, cell: int) -> String:
 	var site: Vector2 = _map.cells[cell].site
 	var best_name := ""
 	var best_dist := INF
-	for s in _civ.factions[f].settlements:
+	for s: int in _civ.factions[f].settlements:
 		var d := site.distance_to(_map.cells[_civ.settlements[s].cell].site)
 		if d < best_dist:
 			best_dist = d

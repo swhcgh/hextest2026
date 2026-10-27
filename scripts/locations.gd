@@ -21,7 +21,7 @@ const KINDS := {
 		"biomes": {&"grassland": 0.6, &"taiga": 0.8, &"beach": 0.3}},
 }
 
-const MINE_RESOURCES := [&"iron", &"copper", &"silver", &"gold", &"coal"]
+const MINE_RESOURCES: Array[StringName] = [&"iron", &"copper", &"silver", &"gold", &"coal"]
 const NAME_WORDS := {
 	&"cave": ["Whispering", "Echo", "Bat", "Crystal", "Hollow", "Dripping", "Blind"],
 	&"dungeon": ["Dread", "Forgotten", "Black", "Sunken", "Weeping", "Iron"],
@@ -58,7 +58,7 @@ func generate(map: VoronoiMap, civ: Civilization, map_seed: int) -> void:
 		settlement_sites.append(cells[s.cell].site)
 		taken.append(cells[s.cell].site)
 
-	for kind in KINDS:
+	for kind: StringName in KINDS:
 		var spec: Dictionary = KINDS[kind]
 		var candidates: Array[Dictionary] = []
 		for i in cells.size():
@@ -74,7 +74,7 @@ func generate(map: VoronoiMap, civ: Civilization, map_seed: int) -> void:
 					nearest = minf(nearest, cell.site.distance_to(p))
 				score += minf(nearest / (cell_size * 5.0), 1.0)
 			candidates.append({"cell": i, "score": score})
-		candidates.sort_custom(func(a, b): return a.score > b.score)
+		candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.score > b.score)
 
 		var wanted := maxi(land_count / spec.land_per, 1)
 		var placed := 0

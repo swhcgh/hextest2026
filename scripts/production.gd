@@ -32,7 +32,7 @@ static func assign(map: VoronoiMap) -> void:
 
 
 static func _terrain_production(cells: Array[Dictionary], cell: Dictionary) -> Dictionary:
-	var p := {}
+	var p: Dictionary[StringName, float] = {}
 	for r in TownResources.RESOURCES:
 		p[r] = 0.0
 	if not cell.is_land:
@@ -57,11 +57,11 @@ static func _terrain_production(cells: Array[Dictionary], cell: Dictionary) -> D
 	if cell.river:
 		p[&"grain"] += 0.4
 		p[&"textiles"] += 0.2
-	for nb in cell.neighbors:
+	for nb: int in cell.neighbors:
 		if not cells[nb].is_land:
 			p[&"meat"] += 0.3  # fishing
 			break
-	for r in p:
+	for r: StringName in p:
 		p[r] = maxf(p[r], 0.0) * PRODUCTION_SCALE
 	return p
 
@@ -95,7 +95,7 @@ static func assign_catchments(map: VoronoiMap, settlements: Array[Dictionary], c
 	while not frontier.is_empty():
 		var next: Array[int] = []
 		for u in frontier:
-			for v in cells[u].neighbors:
+			for v: int in cells[u].neighbors:
 				if cells[v].is_land and cells[v].town < 0 and cell_faction[v] == cell_faction[u]:
 					cells[v].town = cells[u].town
 					cells[v].town_steps = cells[u].town_steps + 1
@@ -114,7 +114,7 @@ static func yield_at(steps: int) -> float:
 static func collect_daily(map: VoronoiMap, settlements: Array[Dictionary]) -> void:
 	var income: Array[Dictionary] = []
 	for s in settlements:
-		var zero := {}
+		var zero: Dictionary[StringName, float] = {}
 		for r in TownResources.RESOURCES:
 			zero[r] = 0.0
 		income.append(zero)
@@ -122,7 +122,7 @@ static func collect_daily(map: VoronoiMap, settlements: Array[Dictionary]) -> vo
 		if cell.town < 0:
 			continue
 		var share := yield_at(cell.town_steps)
-		for r in cell.production:
+		for r: StringName in cell.production:
 			income[cell.town][r] += cell.production[r] * share
 
 	for i in settlements.size():

@@ -34,7 +34,7 @@ var cell_faction := PackedInt32Array()
 var _map: VoronoiMap
 var _border_cache: Array[PackedVector2Array] = []
 var _rng := RandomNumberGenerator.new()
-var _used_names := {}
+var _used_names: Dictionary[String, bool] = {}
 
 
 func generate(map: VoronoiMap, map_seed: int) -> void:
@@ -60,7 +60,7 @@ func _place_settlements() -> void:
 		var score := settle_score(i)
 		if score > 0.0:
 			candidates.append({"cell": i, "score": score})
-	candidates.sort_custom(func(a, b): return a.score > b.score)
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.score > b.score)
 
 	var spacing := cell_size() * 2.4
 	var max_count := maxi(cells.size() / 12, 3)
@@ -98,7 +98,7 @@ func settle_score(i: int) -> float:
 	if base <= 0.0:
 		return -1.0
 	var coastal := false
-	for nb in cell.neighbors:
+	for nb: int in cell.neighbors:
 		if not cells[nb].is_land:
 			coastal = true
 			break
@@ -189,10 +189,10 @@ func _ensure_towns() -> void:
 	for f in factions.size():
 		if factions[f].settlements.size() > 1:
 			continue
-		var taken := {}
+		var taken: Dictionary[int, bool] = {}
 		for s in settlements:
 			taken[s.cell] = true
-		for min_spacing in [cell_size() * 1.5, 0.0]:
+		for min_spacing: float in [cell_size() * 1.5, 0.0]:
 			var best := -1
 			var best_score := -INF
 			for i in cell_faction.size():
@@ -241,7 +241,7 @@ func _claim(capitals: Array[int]) -> PackedInt32Array:
 	sizes.resize(capitals.size())
 	sizes.fill(0)
 
-	var heap := []  # binary min-heap of [cost, cell, faction]
+	var heap: Array[Array] = []  # binary min-heap of [cost, cell, faction]
 	for k in capitals.size():
 		MinHeap.push(heap, [0.0, settlements[capitals[k]].cell, k])
 
@@ -253,7 +253,7 @@ func _claim(capitals: Array[int]) -> PackedInt32Array:
 			continue
 		label[u] = f
 		sizes[f] += 1
-		for v in cells[u].neighbors:
+		for v: int in cells[u].neighbors:
 			if label[v] >= 0 or not cells[v].is_land:
 				continue
 			var step: float = cells[u].site.distance_to(cells[v].site) * (1.0 + cells[v].elevation * 2.0)
@@ -302,7 +302,7 @@ func _compute_cell_border(i: int) -> PackedVector2Array:
 		var own := mid.distance_to(cells[i].site)
 		var across := -1
 		var across_dist := own + 1.0
-		for nb in cells[i].neighbors:
+		for nb: int in cells[i].neighbors:
 			var d := mid.distance_to(cells[nb].site)
 			if d < across_dist:
 				across_dist = d
@@ -321,9 +321,9 @@ func _compute_cell_border(i: int) -> PackedVector2Array:
 ## independent settlement on it joins the faction.
 func claim_cell(cell: int, faction: int) -> void:
 	cell_faction[cell] = faction
-	var touched := {faction: true}
+	var touched: Dictionary[int, bool] = {faction: true}
 	var cells := _map.cells
-	for x in [cell] + cells[cell].neighbors:
+	for x: int in [cell] + cells[cell].neighbors:
 		_border_cache[x] = _compute_cell_border(x)
 		if cell_faction[x] >= 0:
 			touched[cell_faction[x]] = true
