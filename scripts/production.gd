@@ -110,8 +110,9 @@ static func yield_at(steps: int) -> float:
 
 
 ## One day of collection: every town gets the yield of the hexes assigned to
-## it, plus taxes. Fractions carry over between days in settlement.carry.
-static func collect_daily(map: VoronoiMap, settlements: Array[Dictionary]) -> void:
+## it (grain and meat scaled by the season), plus taxes. Fractions carry over between days in settlement.carry.
+static func collect_daily(map: VoronoiMap, settlements: Array[Dictionary], total_days: int = 0) -> void:
+	var harvest := Upkeep.harvest_factor(total_days)
 	var income: Array[Dictionary] = []
 	for s in settlements:
 		var zero: Dictionary[StringName, float] = {}
@@ -133,6 +134,8 @@ static func collect_daily(map: VoronoiMap, settlements: Array[Dictionary]) -> vo
 		var carry: Dictionary = s.carry
 		for r in TownResources.RESOURCES:
 			var amount: float = income[i][r] * multiplier
+			if r == &"grain" or r == &"meat":
+				amount *= harvest  # farmed goods follow the seasons
 			if r == &"gold":
 				amount += BASE_GOLD[s.kind]
 			carry[r] = carry.get(r, 0.0) + amount

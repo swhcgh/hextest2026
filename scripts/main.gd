@@ -80,6 +80,9 @@ var panel_grips: Dictionary[PanelContainer, Control] = {}  # PanelContainer -> i
 var resize_mouse := Vector2.ZERO  # mouse position when a grip was pressed
 var resize_size := Vector2.ZERO  # panel size when a grip was pressed
 var drag_distance := 0.0  # mouse travel since the last press on a panel
+var history := History.new()
+var chart_panel := ChartPanel.new()
+var season_view := SeasonView.new()
 var date_label := Label.new()
 var pause_button := Button.new()
 var legend_list: VBoxContainer
@@ -103,7 +106,13 @@ func _ready() -> void:
 	add_child(trader_view)
 	clock.hour_passed.connect(_on_hour_passed)
 	clock.day_passed.connect(actions.on_day)
-	clock.day_passed.connect(func() -> void: Production.collect_daily(map, civ.settlements))
+	clock.day_passed.connect(func() -> void:
+		Production.collect_daily(map, civ.settlements, clock.total_days)
+		for line in Upkeep.apply_daily(civ.settlements, clock.total_days):
+			_log(line)
+		history.record(civ, clock.total_days)
+		if chart_panel.visible:
+			chart_panel.refresh())
 	actions.changed.connect(_on_world_changed)
 	actions.action_taken.connect(_log)
 	_build_ui()
@@ -114,6 +123,7 @@ func _build_ui() -> void:
 	var ui := CanvasLayer.new()
 	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.add_child(season_view)  # under the panels
 	ui.add_child(overlay)
 	add_child(ui)
 
@@ -158,6 +168,15 @@ func _build_ui() -> void:
 	legend_list = _make_collapsible(legend_panel, "Factions")
 	overlay.add_child(legend_panel)
 
+	# Chart of resources over time, hidden until the Chart button is pressed.
+	chart_panel.setup(history, civ)
+	chart_panel.close_requested.connect(_toggle_chart)
+	_make_draggable(chart_panel, func() -> Vector2: return (overlay.size - chart_panel.size) * 0.5)
+	chart_panel.mouse_entered.connect(_clear_hover)
+	chart_panel.visible = false
+	panel_grips[chart_panel].visible = false
+	overlay.add_child(chart_panel)
+
 	# Grips must come after their panels in the tree, or the panels get the click.
 	for grip: Control in panel_grips.values():
 		overlay.move_child(grip, -1)
@@ -195,6 +214,13 @@ func _build_clock_panel() -> void:
 	slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	row.add_child(slider)
 
+	var chart_button := Button.new()
+	chart_button.text = "Chart"
+	chart_button.focus_mode = Control.FOCUS_NONE
+	_set_font(chart_button)
+	chart_button.pressed.connect(_toggle_chart)
+	row.add_child(chart_button)
+
 	var speed_label := Label.new()
 	_set_min_size(speed_label, Vector2(76, 0))
 	_set_font(speed_label)
@@ -216,13 +242,21 @@ func _build_clock_panel() -> void:
 	_place_clock.call_deferred()
 
 
+func _toggle_chart() -> void:
+	chart_panel.visible = not chart_panel.visible
+	if chart_panel.visible:
+		chart_panel.refresh()
+		_place_panel.call_deferred(chart_panel)
+
+
 func _set_paused(paused: bool) -> void:
 	clock.paused = paused
 	pause_button.text = "Play" if paused else "Pause"
 
 
 func _update_date_label() -> void:
-	date_label.text = clock.date_text()
+	date_label.text = "%s  ·  %s" % [clock.date_text(), Upkeep.season_name(clock.total_days)]
+	season_view.total_days = clock.total_days
 
 
 func _place_clock() -> void:
@@ -489,6 +523,9 @@ func _regenerate(new_seed: int) -> void:
 		line.queue_free()
 	_rebuild_legend()
 	clock.reset()
+	history.reset()
+	history.record(civ, 0)
+	chart_panel.update_scopes()
 	_update_date_label()
 	_scatter_trees()
 	get_window().title = "Hex Test 2026 - seed %d, %d cells" % [map_seed, cell_count]

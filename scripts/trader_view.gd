@@ -48,7 +48,7 @@ func _draw() -> void:
 
 
 func _draw_popup(t: Dictionary) -> void:
-	var status := "Resting in %s" % settlements[t.at].name if t.dest < 0 else "Heading to %s" % settlements[t.dest].name
+	var status := "Resting in %s" % settlements[t.at].name if t.dest < 0 else ("Returning to %s" if t.returning else "Heading to %s") % settlements[t.dest].name
 	var lines: Array[String] = ["Trader", traders.faction_name_of(t), status, "Trades made: %d" % t.trades]
 	var cargo := TownResources.stock_lines(t.cargo)
 	if cargo.is_empty():
