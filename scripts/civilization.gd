@@ -319,11 +319,15 @@ func _compute_cell_border(i: int) -> PackedVector2Array:
 	return segments
 
 
-## Gives an unclaimed cell to a faction, refreshing the affected outlines. An
-## independent settlement on it joins the faction.
+## Gives a cell to a faction, refreshing the affected outlines. A settlement on
+## it joins the faction, leaving its old one if it had any (a captured capital
+## is not handled; wars leave capitals alone).
 func claim_cell(cell: int, faction: int) -> void:
+	var previous := cell_faction[cell]
 	cell_faction[cell] = faction
 	var touched: Dictionary[int, bool] = {faction: true}
+	if previous >= 0:
+		touched[previous] = true
 	var cells := _map.cells
 	for x: int in [cell] + cells[cell].neighbors:
 		_border_cache[x] = _compute_cell_border(x)
@@ -332,8 +336,11 @@ func claim_cell(cell: int, faction: int) -> void:
 	for f in touched:
 		_assemble_border(f)
 	for i in settlements.size():
-		if settlements[i].cell == cell and settlements[i].faction < 0:
-			settlements[i].faction = faction
+		var s := settlements[i]
+		if s.cell == cell and s.faction != faction and not s.ruined:
+			if s.faction >= 0:
+				factions[s.faction].settlements.erase(i)
+			s.faction = faction
 			factions[faction].settlements.append(i)
 
 

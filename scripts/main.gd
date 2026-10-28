@@ -49,6 +49,7 @@ const LAYERS := [
 	[&"settlements", "Settlements"],
 	[&"locations", "Locations"],
 	[&"traders", "Traders"],
+	[&"armies", "Armies"],
 	[&"disasters", "Disasters"],
 	[&"labels", "Settlement names"],
 	[&"places_list", "Location list"],
@@ -82,6 +83,8 @@ var list_hover := {}  # {name, cell} of the location list row under the mouse, o
 var traders := Traders.new()
 var actions := FactionActions.new()
 var events := WorldEvents.new()
+var war := War.new()
+var army_view := ArmyView.new()
 var trader_view := TraderView.new()
 var popups := PopupLayer.new()  # hover popups, above every panel
 var clock_panel := PanelContainer.new()
@@ -103,6 +106,7 @@ var hovered := -1  # settlement index under the mouse, or -1
 var hovered_location := -1  # location index under the mouse, or -1
 var hovered_cell := -1  # land hex under the mouse (for its production popup), or -1
 var trader_hovered := false  # a trader's popup is showing instead
+var army_hovered := false  # an army's popup is showing instead
 var hovered_faction := -1  # faction whose region is under the mouse, or -1
 
 
@@ -118,9 +122,19 @@ func _ready() -> void:
 		queue_redraw())
 	trader_view.settlements = civ.settlements
 	add_child(trader_view)
+	army_view.war = war
+	army_view.civ = civ
+	army_view.popups = popups
+	army_view.hover_changed.connect(func(over: bool) -> void:
+		army_hovered = over
+		queue_redraw())
+	add_child(army_view)
+	traders.at_war = war.at_war
 	clock.hour_passed.connect(_on_hour_passed)
 	clock.day_passed.connect(actions.on_day)
-	clock.day_passed.connect(func() -> void: events.on_day(clock.total_days))
+	clock.day_passed.connect(func() -> void:
+		events.on_day(clock.total_days)
+		war.on_day(clock.total_days))
 	clock.day_passed.connect(func() -> void:
 		Production.collect_daily(map, civ.settlements, clock.total_days, events.farm_mult)
 		for line in Upkeep.apply_daily(civ.settlements, clock.total_days):
@@ -131,6 +145,8 @@ func _ready() -> void:
 	actions.changed.connect(_on_world_changed)
 	actions.action_taken.connect(_log)
 	events.event_occurred.connect(_log)
+	war.event_occurred.connect(_log)
+	war.status_changed.connect(_on_world_changed)
 	events.towns_lost.connect(_on_world_changed)
 	events.changed.connect(queue_redraw)
 	_build_ui()
@@ -532,7 +548,8 @@ func _make_collapsible(panel: PanelContainer, title_text: String, scroll_size :=
 func _rebuild_legend() -> void:
 	for row in legend_list.get_children():
 		row.queue_free()
-	for f in civ.factions:
+	for fi in civ.factions.size():
+		var f := civ.factions[fi]
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 4)
 		row.set_meta(&"base_separation", 4)
@@ -543,6 +560,9 @@ func _rebuild_legend() -> void:
 		row.add_child(swatch)
 		var label := Label.new()
 		label.text = "%s (%d settlements)" % [f.name, f.settlements.size()]
+		var enemy := war.enemy_of(fi)
+		if enemy >= 0:
+			label.text += " - at war with " + civ.factions[enemy].name
 		_set_font(label)
 		row.add_child(label)
 		legend_list.add_child(row)
@@ -580,6 +600,7 @@ func _on_layer_toggled(pressed: bool, key: StringName) -> void:
 	if not layers.places_list:
 		list_hover = {}
 	trader_view.visible = layers.traders
+	army_view.visible = layers.armies
 	_sync_trader_view()
 	queue_redraw()
 
@@ -597,6 +618,7 @@ func _clear_hover() -> void:
 ## Traders defer to a hovered settlement or location.
 func _sync_trader_view() -> void:
 	trader_view.suppressed = hovered >= 0 or hovered_location >= 0
+	army_view.suppressed = hovered >= 0 or hovered_location >= 0
 
 
 func _regenerate(new_seed: int) -> void:
@@ -615,6 +637,7 @@ func _regenerate(new_seed: int) -> void:
 	traders.spawn(map, civ.settlements, civ.factions, roads, map_seed)
 	actions.setup(civ, map, roads, places.locations, map_seed)
 	events.setup(civ, map, map_seed)
+	war.setup(civ, map, roads, places.locations, map_seed)
 	for line in log_list.get_children():
 		log_list.remove_child(line)
 		line.queue_free()
@@ -647,6 +670,7 @@ func _scatter_trees() -> void:
 func _process(delta: float) -> void:
 	clock.advance(delta)
 	traders.update(clock.elapsed_hours)
+	war.update(clock.elapsed_hours)
 	var dir := Vector2(
 		Input.get_axis(&"ui_left", &"ui_right") + float(Input.is_key_pressed(KEY_D)) - float(Input.is_key_pressed(KEY_A)),
 		float(Input.is_key_pressed(KEY_S)) - float(Input.is_key_pressed(KEY_W)))
@@ -817,7 +841,7 @@ func _draw() -> void:
 		if loc.resource != &"":
 			kind = "%s %s" % [String(loc.resource).capitalize(), loc.kind]
 		_draw_popup(loc.name, kind, loc.cell, loc.faction, "Unclaimed", [] as Array[String])
-	elif hovered_cell >= 0 and not trader_hovered:
+	elif hovered_cell >= 0 and not trader_hovered and not army_hovered:
 		_draw_hex_popup(hovered_cell)
 
 
@@ -964,6 +988,8 @@ func _draw_locations() -> void:
 func _settlement_lines(s: Dictionary) -> Array[String]:
 	var lines: Array[String] = ["Population: %d" % int(s.population)]
 	lines.append_array(TownResources.stock_lines(s.stock))
+	lines.append("Labor:")
+	lines.append_array(Labor.lines(s.labor))
 	return lines
 
 

@@ -38,6 +38,7 @@ static func generate_one(map: VoronoiMap, s: Dictionary, rng: RandomNumberGenera
 	# Gold is coin as much as ore: every settlement holds some.
 	stock[&"gold"] += BASE_GOLD[s.kind]
 	s["stock"] = stock
+	s["labor"] = Labor.even()
 	var pop_range: Vector2 = START_POPULATION[s.kind]
 	s["population"] = rng.randf_range(pop_range.x, pop_range.y)
 

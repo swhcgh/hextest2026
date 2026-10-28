@@ -11,7 +11,7 @@ extends RefCounted
 ## cell.town_steps: hexes between this hex and that town
 
 const PRODUCTION_SCALE := 0.2  # terrain values below are x this per day
-const CITY_MULTIPLIER := 1.5  # cities work their land harder
+const CITY_MULTIPLIER := 1.5  # cities support more people on the same food
 const BASE_GOLD := {&"city": 0.6, &"town": 0.2}  # daily taxes
 const MINE_PRODUCTION := 0.5  # added to a mine's hex by Locations
 const MIN_YIELD := 0.25  # share of production collected from the farthest hexes
@@ -137,12 +137,13 @@ static func collect_daily(map: VoronoiMap, settlements: Array[Dictionary], total
 		var s := settlements[i]
 		if s.ruined:
 			continue
-		var multiplier := CITY_MULTIPLIER if s.kind == &"city" else 1.0
+		if Labor.review_due(i, total_days):
+			Labor.review(s, income[i])
 		if not s.has("carry"):
 			s["carry"] = {}
 		var carry: Dictionary = s.carry
 		for r in TownResources.RESOURCES:
-			var amount: float = income[i][r] * multiplier
+			var amount: float = income[i][r] * Labor.output_factor(s, r)
 			if r == &"grain" or r == &"meat":
 				amount *= harvest  # farmed goods follow the seasons
 			if r == &"gold":
@@ -152,6 +153,8 @@ static func collect_daily(map: VoronoiMap, settlements: Array[Dictionary], total
 			if whole > 0:
 				s.stock[r] += whole
 				carry[r] -= whole
-		var food: float = (income[i][&"grain"] + income[i][&"meat"]) * multiplier
+		# The ceiling follows the land and the hands on food, not the head count.
+		var food: float = (income[i][&"grain"] * s.labor[&"grain"] + income[i][&"meat"] * s.labor[&"meat"]) \
+				* TownResources.RESOURCES.size() * (CITY_MULTIPLIER if s.kind == &"city" else 1.0)
 		var capacity := BASE_CAPACITY + food * PEOPLE_PER_DAILY_FOOD
 		s.population = maxf(s.population + s.population * GROWTH_RATE * (1.0 - s.population / capacity), 1.0)

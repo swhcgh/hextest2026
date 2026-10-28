@@ -47,6 +47,9 @@ const MIN_DEAL := 3.0  # worth-the-trip threshold
 const NEUTRAL_COLOR := Color("9a9a9a")
 
 var traders: Array[Dictionary] = []
+## Whether two factions (indices) are at war; set by the map. Traders won't
+## deal with the enemy's towns.
+var at_war := Callable()
 
 var _map: VoronoiMap
 var _settlements: Array[Dictionary]
@@ -126,7 +129,7 @@ func _depart(t: Dictionary) -> void:
 		return  # nothing to spare
 	var options: Array[int] = []
 	for i in _settlements.size():
-		if i != home and not _settlements[i].ruined and _roads.landmass[_settlements[i].cell] == _roads.landmass[from_cell]:
+		if i != home and not _settlements[i].ruined and not _hostile(home, i) and _roads.landmass[_settlements[i].cell] == _roads.landmass[from_cell]:
 			options.append(i)
 	var here := _site(home)
 	options.sort_custom(func(a: int, b: int) -> bool: return here.distance_squared_to(_site(a)) < here.distance_squared_to(_site(b)))
@@ -196,8 +199,9 @@ func _arrive(t: Dictionary) -> void:
 
 	# At the far town: sell the cargo, buy what home is short of, head back.
 	t.at = stop
-	_trade(t, stop)
-	t.trades += 1
+	if not _hostile(t.home, stop):  # war broke out on the way: turn back with the cargo
+		_trade(t, stop)
+		t.trades += 1
 	var path := _roads.find_path(_settlements[stop].cell, _settlements[t.home].cell)
 	if path.size() < 2:
 		t.home = stop  # cut off from home; settle here instead
@@ -208,6 +212,10 @@ func _arrive(t: Dictionary) -> void:
 		t.cargo = {}
 		return
 	_start(t, t.home, path, true)
+
+
+func _hostile(a: int, b: int) -> bool:
+	return at_war.is_valid() and at_war.call(_settlements[a].faction, _settlements[b].faction)
 
 
 ## How much of a good a town keeps in store: about TARGET_DAYS of its needs.
