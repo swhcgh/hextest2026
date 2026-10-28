@@ -22,8 +22,10 @@ signal changed
 ## A town was ruined, so settlement lists and territory need refreshing.
 signal towns_lost
 signal event_occurred(text: String)
+## A disaster began; `entry` is its record in `active`.
+signal started(entry: Dictionary)
 
-const DAILY_CHANCE := 0.03  # per world day, for some disaster to strike
+const DAILY_CHANCE := 0.015  # per world day, for some disaster to strike
 const FADE_DAYS := 8  # how long a sudden disaster stays marked on the map
 const ATTEMPTS := 15  # epicenters tried per event before it fizzles out
 const DAMAGE_JITTER := Vector2(0.7, 1.3)  # luck in how hard each settlement is hit
@@ -247,14 +249,18 @@ func _hit(kind: StringName, spec: Dictionary, center: int, area: Dictionary[int,
 	if not ruined.is_empty():
 		Production.assign_catchments(_map, _civ.settlements, _civ.cell_faction)
 		towns_lost.emit()
-	active.append({"kind": kind, "center": center, "cells": area, "age": 0, "lifetime": FADE_DAYS})
+	var entry := {"kind": kind, "center": center, "cells": area, "age": 0, "lifetime": FADE_DAYS}
+	active.append(entry)
+	started.emit(entry)
 
 
 ## A drought: no direct damage, but farmed goods yield less for weeks. Hunger
 ## does the rest through upkeep and the population ceiling.
 func _start_lasting(kind: StringName, spec: Dictionary, center: int, area: Dictionary[int, float]) -> void:
 	var days: Vector2i = spec.duration
-	active.append({"kind": kind, "center": center, "cells": area, "age": 0, "lifetime": _rng.randi_range(days.x, days.y)})
+	var entry := {"kind": kind, "center": center, "cells": area, "age": 0, "lifetime": _rng.randi_range(days.x, days.y)}
+	active.append(entry)
+	started.emit(entry)
 	_rebuild_farm_mult()
 	event_occurred.emit("Drought grips the land around %s" % _nearest_name(center))
 

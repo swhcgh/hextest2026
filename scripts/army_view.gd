@@ -70,8 +70,14 @@ func war_site(cell: int) -> Vector2:
 
 func _show_popup(army: Dictionary) -> void:
 	var goal: Dictionary = army.goal
-	var status := "Returning home" if army.phase == &"returning" else ("Marching to take land near %s" if goal.kind == &"capture" else "Marching to raid %s") % goal.name
-	var lines: Array[String] = ["Army", civ.factions[army.faction].name, "At war with " + civ.factions[army.enemy].name, "Men: %d" % army.men, status]
+	var status: String
+	if army.phase == &"returning":
+		status = "Returning home"
+	elif goal.kind == &"defend":
+		status = "Marching to defend " + goal.name
+	else:
+		status = ("Marching to take land near %s" if goal.kind == &"capture" else "Marching to raid %s") % goal.name
+	var lines: Array[String] = ["Army", civ.factions[army.faction].name, ("At war with " + civ.factions[army.enemy].name) if army.enemy >= 0 else "Defending against monsters", "Men: %d" % army.men, status]
 	var loot := TownResources.stock_lines(army.plunder)
 	if not loot.is_empty():
 		lines.append("Loot:")

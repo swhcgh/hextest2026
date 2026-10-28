@@ -4,6 +4,9 @@ extends CanvasLayer
 ## source (the map, the traders) sets or clears its own popup; anchors are
 ## screen positions.
 
+## Popups are kept inside the area ending here (the part of the screen the map shows).
+var view_end := Vector2(100000, 100000)
+
 var _popups: Dictionary[Object, Dictionary] = {}
 var _canvas := Control.new()
 
@@ -28,4 +31,4 @@ func clear_popup(source: Object) -> void:
 
 func _draw_popups() -> void:
 	for p: Dictionary in _popups.values():
-		PopupBox.draw(_canvas, p.lines, p.anchor, _canvas.size, p.color, p.swatch)
+		PopupBox.draw(_canvas, p.lines, p.anchor, view_end, p.color, p.swatch)

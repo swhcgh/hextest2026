@@ -320,8 +320,11 @@ func faction_name_of(t: Dictionary) -> String:
 ## Hours to cross the trader's current segment: a day on a road, longer off
 ## road by the average difficulty of the two cells.
 func _segment_hours(t: Dictionary) -> float:
-	var a: int = t.path[t.segment]
-	var b: int = t.path[t.segment + 1]
+	return tile_hours(t.path[t.segment], t.path[t.segment + 1])
+
+
+## Hours to cross from one cell to a neighboring one.
+func tile_hours(a: int, b: int) -> float:
 	if _roads.has_road(a, b):
 		return HOURS_PER_TILE
 	return HOURS_PER_TILE * (_terrain_multiplier(_map.cells[a]) + _terrain_multiplier(_map.cells[b])) * 0.5

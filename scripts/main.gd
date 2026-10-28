@@ -3,6 +3,8 @@ extends Node2D
 ## Space: pause/resume time. Enter/R: new world. Up/Down: cell count.
 ## Hover a settlement for details, or a faction's region to highlight it.
 ## The left panel toggles each visual layer.
+## Time stands still while the player does (see the clock panel's checkbox).
+## Right-click: walk the player there. C: center on the player.
 ## Camera: drag with left/middle mouse or WASD/arrows to pan, mouse wheel or +/- to zoom.
 
 const BIOME_COLORS := {
@@ -50,6 +52,8 @@ const LAYERS := [
 	[&"locations", "Locations"],
 	[&"traders", "Traders"],
 	[&"armies", "Armies"],
+	[&"monsters", "Monsters"],
+	[&"player", "Player"],
 	[&"disasters", "Disasters"],
 	[&"labels", "Settlement names"],
 	[&"places_list", "Location list"],
@@ -57,9 +61,15 @@ const LAYERS := [
 	[&"log", "Event log"],
 ]
 const PANEL_FONT_SIZE := 11
+const GAME_SPEEDS: Array[float] = [1.0, 2.0, 6.0, 24.0, 168.0]  # world hours per second
+const GAME_SPEED_NAMES: Array[String] = ["1 h/s", "2 h/s", "6 h/s", "1 day/s", "1 week/s"]
 const MAX_LOG_LINES := 500
-const LOG_SIZE := Vector2(380, 120)  # default size of the scrolling log
-const PLACES_SIZE := Vector2(210, 170)  # default size of the location list
+const SIDE_WIDTH := 140.0  # left dock: map toggles and the location list
+const BOTTOM_HEIGHT := 120.0  # bottom dock: log, player, clock, factions
+const LOG_SIZE := Vector2(240, 80)  # smallest size of the scrolling log
+const PLACES_SIZE := Vector2(110, 60)  # smallest size of the location list
+const PLAYER_SIZE := Vector2(300, 80)
+const LEGEND_SIZE := Vector2(220, 80)
 const HIGHLIGHT_COLOR := Color("ffe14a")
 const RUIN_COLOR := Color("b08a68")
 const ZOOM_MIN := 1.0
@@ -85,10 +95,28 @@ var actions := FactionActions.new()
 var events := WorldEvents.new()
 var war := War.new()
 var army_view := ArmyView.new()
+var monsters := Monsters.new()
+var monster_view := MonsterView.new()
+var player := Player.new()
+var player_view := PlayerView.new()
+var disaster_view := DisasterView.new()
+var player_panel := PanelContainer.new()
+var gold_label := Label.new()
+var cargo_label := Label.new()
+var status_label := Label.new()
+var trade_box := VBoxContainer.new()  # shown while the player is in a settlement
+var trade_title := Label.new()
+var trade_rows: Dictionary[StringName, Dictionary] = {}  # good -> {label, buy, sell}
+var trade_was_open := false
+var player_was_moving := false  # to catch the moment the player sets off or stops
+var allow_idle_play := true  # whether Play works while the player stands still
 var trader_view := TraderView.new()
 var popups := PopupLayer.new()  # hover popups, above every panel
 var clock_panel := PanelContainer.new()
 var layers_panel := PanelContainer.new()
+var sidebar := PanelContainer.new()  # left dock
+var bottom_bar := PanelContainer.new()  # bottom dock
+var view_rect := Rect2()  # screen area left for the map, above the bottom dock and right of the left one
 var panel_homes: Dictionary[PanelContainer, Callable] = {}  # PanelContainer -> Callable returning its default position
 var panel_offsets: Dictionary[PanelContainer, Vector2] = {}  # PanelContainer -> Vector2 the user dragged it away from home
 var panel_grips: Dictionary[PanelContainer, Control] = {}  # PanelContainer -> its resize grip
@@ -107,11 +135,14 @@ var hovered_location := -1  # location index under the mouse, or -1
 var hovered_cell := -1  # land hex under the mouse (for its production popup), or -1
 var trader_hovered := false  # a trader's popup is showing instead
 var army_hovered := false  # an army's popup is showing instead
+var monster_hovered := false  # a monster's popup is showing instead
+var disaster_hovered := false  # the mouse is over a disaster badge
 var hovered_faction := -1  # faction whose region is under the mouse, or -1
 
 
 func _ready() -> void:
-	map.size = get_viewport_rect().size
+	view_rect = _view_rect_for(get_viewport_rect().size)
+	map.size = view_rect.size
 	camera.position = map.size * 0.5
 	add_child(camera)
 	add_child(popups)
@@ -129,12 +160,32 @@ func _ready() -> void:
 		army_hovered = over
 		queue_redraw())
 	add_child(army_view)
+	monster_view.monsters = monsters
+	monster_view.popups = popups
+	monster_view.hover_changed.connect(func(over: bool) -> void:
+		monster_hovered = over
+		queue_redraw())
+	add_child(monster_view)
 	traders.at_war = war.at_war
+	player_view.player = player
+	player_view.map = map
+	add_child(player_view)
+	disaster_view.events = events
+	disaster_view.map = map
+	disaster_view.hover_changed.connect(func(over: bool) -> void:
+		disaster_hovered = over
+		queue_redraw())
+	add_child(disaster_view)
+	events.started.connect(disaster_view.add_flash)
+	clock.week_passed.connect(func() -> void:
+		Market.update_all(civ.settlements)
+		queue_redraw())
 	clock.hour_passed.connect(_on_hour_passed)
 	clock.day_passed.connect(actions.on_day)
 	clock.day_passed.connect(func() -> void:
 		events.on_day(clock.total_days)
-		war.on_day(clock.total_days))
+		war.on_day(clock.total_days)
+		monsters.on_day(clock.total_days))
 	clock.day_passed.connect(func() -> void:
 		Production.collect_daily(map, civ.settlements, clock.total_days, events.farm_mult)
 		for line in Upkeep.apply_daily(civ.settlements, clock.total_days):
@@ -146,6 +197,8 @@ func _ready() -> void:
 	actions.action_taken.connect(_log)
 	events.event_occurred.connect(_log)
 	war.event_occurred.connect(_log)
+	monsters.event_occurred.connect(_log)
+	monsters.towns_lost.connect(_on_world_changed)
 	war.status_changed.connect(_on_world_changed)
 	events.towns_lost.connect(_on_world_changed)
 	events.changed.connect(queue_redraw)
@@ -161,60 +214,77 @@ func _build_ui() -> void:
 	ui.add_child(overlay)
 	add_child(ui)
 
-	# Layer toggles, top-left.
-	_make_draggable(layers_panel, func() -> Vector2: return Vector2(8, 8))
+	# Two docks hold most of the panels: map toggles and the location list down
+	# the left, everything else along the bottom. The map fills what is left.
+	var dock_style := StyleBoxFlat.new()
+	dock_style.bg_color = Color(0.11, 0.12, 0.14)
+	for margin in ["left", "right", "top", "bottom"]:
+		dock_style.set("content_margin_" + margin, 6.0)
+	for dock: PanelContainer in [sidebar, bottom_bar]:
+		dock.add_theme_stylebox_override("panel", dock_style)
+		dock.mouse_entered.connect(_clear_hover)
+	var side_box := VBoxContainer.new()
+	side_box.add_theme_constant_override("separation", 6)
+	sidebar.add_child(side_box)
+	var bottom_box := HBoxContainer.new()
+	bottom_box.add_theme_constant_override("separation", 6)
+	bottom_bar.add_child(bottom_box)
+	overlay.add_child(sidebar)
+	overlay.add_child(bottom_bar)
+
+	# Layer toggles.
 	var layer_list := _make_collapsible(layers_panel, "Layers")
 	# Tight padding so the checkboxes pack closely.
 	var tight := StyleBoxEmpty.new()
 	tight.content_margin_left = 2
 	tight.content_margin_right = 2
-	tight.content_margin_top = 1
-	tight.content_margin_bottom = 1
+	tight.content_margin_top = 0
+	tight.content_margin_bottom = 0
 	for layer: Array in LAYERS:
 		layers[layer[0]] = true
 		var check := CheckBox.new()
 		check.text = layer[1]
 		check.button_pressed = true
 		check.focus_mode = Control.FOCUS_NONE  # keep Space/Enter for "new world"
-		_set_font(check)
-		for state: String in ["normal", "pressed", "hover", "hover_pressed", "focus"]:
+		_set_font(check, -2)
+		for state: String in ["normal", "pressed", "hover", "hover_pressed", "focus", "disabled", "normal_mirrored", "pressed_mirrored", "hover_mirrored", "hover_pressed_mirrored", "disabled_mirrored"]:
 			check.add_theme_stylebox_override(state, tight)
+		check.add_theme_constant_override("h_separation", 3)
+		for icon_name: String in ["checked", "unchecked"]:
+			check.add_theme_icon_override(icon_name, _shrunk_icon(check.get_theme_icon(icon_name), 0.7))
 		check.toggled.connect(_on_layer_toggled.bind(layer[0]))
 		layer_list.add_child(check)
-	overlay.add_child(layers_panel)
-	_place_panel(layers_panel)
+	side_box.add_child(layers_panel)
 
-	_build_clock_panel()
-	overlay.add_child(clock_panel)
+	# Every settlement and location by name. Mousing over a row marks that
+	# place on the map. It takes the rest of the left dock.
+	places_panel.set_meta(&"expands", true)
+	places_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	places_list = _make_collapsible(places_panel, "Locations", PLACES_SIZE)
+	side_box.add_child(places_panel)
 
-	# Event log, bottom-left.
-	_make_draggable(log_panel, func() -> Vector2: return Vector2(8.0, overlay.size.y - log_panel.size.y - 8.0))
-	log_panel.resized.connect(_place_log)
-	overlay.resized.connect(_place_log)
+	# Bottom dock, left to right: event log (takes the spare width), player, clock, factions.
+	log_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	log_list = _make_collapsible(log_panel, "Event log", LOG_SIZE)
 	log_scroll = log_list.get_parent()
-	overlay.add_child(log_panel)
+	bottom_box.add_child(log_panel)
 
-	# Every settlement and location by name, bottom-right. Mousing over a row
-	# marks that place on the map.
-	_make_draggable(places_panel, func() -> Vector2: return overlay.size - places_panel.size - Vector2(8.0, 8.0))
-	places_panel.resized.connect(_place_places)
-	overlay.resized.connect(_place_places)
-	places_list = _make_collapsible(places_panel, "Locations", PLACES_SIZE)
-	overlay.add_child(places_panel)
+	_build_player_panel()
+	bottom_box.add_child(player_panel)
 
-	# Faction summary, top-right; re-pinned to the right edge whenever its size
-	# (or the window's) changes.
-	_make_draggable(legend_panel, func() -> Vector2: return Vector2(overlay.size.x - legend_panel.size.x - 8.0, 8.0))
-	legend_panel.resized.connect(_place_legend)
-	overlay.resized.connect(_place_legend)
-	legend_list = _make_collapsible(legend_panel, "Factions")
-	overlay.add_child(legend_panel)
+	_build_clock_panel()
+	bottom_box.add_child(clock_panel)
+
+	legend_list = _make_collapsible(legend_panel, "Factions", LEGEND_SIZE)
+	bottom_box.add_child(legend_panel)
+
+	overlay.resized.connect(_layout)
+	_layout.call_deferred()
 
 	# Chart of resources over time, hidden until the Chart button is pressed.
 	chart_panel.setup(history, civ)
 	chart_panel.close_requested.connect(_toggle_chart)
-	_make_draggable(chart_panel, func() -> Vector2: return (overlay.size - chart_panel.size) * 0.5)
+	_make_draggable(chart_panel, func() -> Vector2: return view_rect.get_center() - chart_panel.size * 0.5)
 	chart_panel.mouse_entered.connect(_clear_hover)
 	chart_panel.visible = false
 	panel_grips[chart_panel].visible = false
@@ -225,12 +295,9 @@ func _build_ui() -> void:
 		overlay.move_child(grip, -1)
 
 
-## Date, pause button and speed slider, bottom-center.
+## Date, pause button and speed slider.
 func _build_clock_panel() -> void:
 	clock_panel.mouse_entered.connect(_clear_hover)
-	_make_draggable(clock_panel, func() -> Vector2: return Vector2((overlay.size.x - clock_panel.size.x) * 0.5, overlay.size.y - clock_panel.size.y - 8.0))
-	clock_panel.resized.connect(_place_clock)
-	overlay.resized.connect(_place_clock)
 	var box := VBoxContainer.new()
 	clock_panel.add_child(box)
 
@@ -246,16 +313,27 @@ func _build_clock_panel() -> void:
 	pause_button.pressed.connect(func() -> void: _set_paused(not clock.paused))
 	row.add_child(pause_button)
 
+	# The slider snaps between a few named speeds (see GAME_SPEEDS).
 	var slider := HSlider.new()
-	slider.min_value = 1
-	slider.max_value = WorldClock.HOURS_PER_DAY * 7  # top speed: one week per second
+	slider.min_value = 0
+	slider.max_value = GAME_SPEEDS.size() - 1
 	slider.step = 1
-	slider.value = clock.hours_per_second
+	slider.tick_count = GAME_SPEEDS.size()
+	slider.ticks_on_borders = true
+	slider.value = maxi(GAME_SPEEDS.find(clock.hours_per_second), 0)
 	slider.focus_mode = Control.FOCUS_NONE
 	_set_min_size(slider, Vector2(140, 0))
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL  # takes up extra width
 	slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	row.add_child(slider)
+
+	var idle_check := CheckBox.new()
+	idle_check.text = "Allow Play while idle"
+	idle_check.tooltip_text = "Allow Play to run time while the player stands still"
+	idle_check.button_pressed = allow_idle_play
+	idle_check.focus_mode = Control.FOCUS_NONE
+	_set_font(idle_check)
+	idle_check.toggled.connect(func(on: bool) -> void: allow_idle_play = on)
 
 	var chart_button := Button.new()
 	chart_button.text = "Chart"
@@ -263,26 +341,21 @@ func _build_clock_panel() -> void:
 	_set_font(chart_button)
 	chart_button.pressed.connect(_toggle_chart)
 	row.add_child(chart_button)
+	box.add_child(idle_check)
 
 	var speed_label := Label.new()
 	_set_min_size(speed_label, Vector2(76, 0))
 	_set_font(speed_label)
 	row.add_child(speed_label)
-	var update_speed := func(v: float) -> void:
-		clock.hours_per_second = v
-		if v >= WorldClock.HOURS_PER_DAY * 7:
-			speed_label.text = "1 week/s"
-		elif v >= WorldClock.HOURS_PER_DAY:
-			speed_label.text = "%s days/s" % String.num(snappedf(v / WorldClock.HOURS_PER_DAY, 0.01)).trim_suffix(".0")
-		else:
-			speed_label.text = "%d h/s" % v
+	var update_speed := func(stop: float) -> void:
+		clock.hours_per_second = GAME_SPEEDS[int(stop)]
+		speed_label.text = GAME_SPEED_NAMES[int(stop)]
 	slider.value_changed.connect(update_speed)
 	update_speed.call(slider.value)
 
 	clock.hour_passed.connect(_update_date_label)
 	_update_date_label()
 	_set_paused(false)
-	_place_clock.call_deferred()
 
 
 func _toggle_chart() -> void:
@@ -300,14 +373,6 @@ func _set_paused(paused: bool) -> void:
 func _update_date_label() -> void:
 	date_label.text = "%s  ·  %s" % [clock.date_text(), Upkeep.season_name(clock.total_days)]
 	season_view.total_days = clock.total_days
-
-
-func _place_clock() -> void:
-	_place_panel(clock_panel)
-
-
-func _place_log() -> void:
-	_place_panel(log_panel)
 
 
 ## Appends a dated line to the event log, dropping the oldest beyond the limit.
@@ -335,8 +400,86 @@ func _scroll_log_to_end() -> void:
 	log_scroll.scroll_vertical = int(log_scroll.get_v_scroll_bar().max_value)
 
 
-func _place_places() -> void:
-	_place_panel(places_panel)
+## The player's gold and cargo, plus a trading table while in a settlement.
+func _build_player_panel() -> void:
+	var list := _make_collapsible(player_panel, "Player", PLAYER_SIZE)
+	for label: Label in [gold_label, cargo_label, status_label, trade_title]:
+		_set_font(label)
+		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_set_min_size(label, Vector2(280, 0))
+	_set_font(gold_label, 2)
+	list.add_child(gold_label)
+	list.add_child(cargo_label)
+	list.add_child(status_label)
+	trade_box.add_theme_constant_override("separation", 1)
+	trade_box.add_child(HSeparator.new())
+	trade_box.add_child(trade_title)
+	for r in Market.TRADE_GOODS:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 4)
+		row.set_meta(&"base_separation", 4)
+		var label := Label.new()
+		_set_font(label)
+		_set_min_size(label, Vector2(190, 0))
+		var buy := Button.new()
+		buy.text = "Buy"
+		var sell := Button.new()
+		sell.text = "Sell"
+		for b: Button in [buy, sell]:
+			b.focus_mode = Control.FOCUS_NONE
+			_set_font(b)
+		buy.pressed.connect(_trade.bind(r, true))
+		sell.pressed.connect(_trade.bind(r, false))
+		row.add_child(label)
+		row.add_child(buy)
+		row.add_child(sell)
+		trade_box.add_child(row)
+		trade_rows[r] = {"label": label, "buy": buy, "sell": sell}
+	list.add_child(trade_box)
+	trade_box.visible = false
+	_apply_font_delta(player_panel)
+
+
+func _trade(r: StringName, buying: bool) -> void:
+	var here := player.settlement_here()
+	if here < 0:
+		return
+	if buying:
+		player.buy(here, r)
+	else:
+		player.sell(here, r)
+	queue_redraw()  # a shown popup lists the town's stock
+
+
+## Keeps the player panel's numbers current.
+func _refresh_player_panel() -> void:
+	if not player_panel.visible:
+		return
+	gold_label.text = "Gold: %.2f" % player.gold
+	var parts: Array[String] = []
+	for r in Market.TRADE_GOODS:
+		if player.cargo.get(r, 0) > 0:
+			parts.append("%s %d" % [String(r).capitalize(), player.cargo[r]])
+	cargo_label.text = "Carrying %d/%d%s" % [player.carried(), Player.CAPACITY, ": " + ", ".join(PackedStringArray(parts)) if not parts.is_empty() else ""]
+	var here := player.settlement_here()
+	if player.is_moving():
+		status_label.text = "Travelling (right-click to change course)"
+	elif here >= 0:
+		status_label.text = "In %s" % civ.settlements[here].name
+	else:
+		status_label.text = "Standing in the wilds (right-click to walk)"
+	var open := here >= 0
+	if open:
+		var s := civ.settlements[here]
+		trade_title.text = "Market of %s - buy / sell, weekly prices" % s.name
+		for r in Market.TRADE_GOODS:
+			var row: Dictionary = trade_rows[r]
+			row.label.text = "%s  %.2f / %.2f  town %d  you %d" % [
+					String(r).capitalize(), Market.buy_price(s, r), Market.sell_price(s, r), s.stock[r], player.cargo.get(r, 0)]
+			row.buy.disabled = not player.can_buy(here, r)
+			row.sell.disabled = not player.can_sell(r)
+	trade_box.visible = open
+	trade_was_open = open
 
 
 ## Rebuilds the location list: living settlements and locations, A to Z.
@@ -384,10 +527,6 @@ func _rebuild_places() -> void:
 	queue_redraw()
 
 
-func _place_legend() -> void:
-	_place_panel(legend_panel)
-
-
 ## Lets `panel` be dragged by its background. `home` gives the panel's default
 ## position; dragging stores an offset from it, so the panel keeps tracking its
 ## edge as it resizes.
@@ -424,6 +563,8 @@ func _on_panel_gui_input(event: InputEvent, panel: PanelContainer) -> void:
 	elif motion and motion.button_mask & MOUSE_BUTTON_MASK_LEFT:
 		drag_distance += motion.relative.length()
 		if drag_distance >= DRAG_THRESHOLD:
+			if not panel_homes.has(panel):
+				return  # docked panels stay put
 			var home: Vector2 = panel_homes[panel].call()
 			panel_offsets[panel] = _clamp_to_overlay(panel, panel.position + motion.relative) - home
 			_place_panel(panel)
@@ -459,6 +600,15 @@ func _on_grip_gui_input(event: InputEvent, panel: PanelContainer) -> void:
 		panel.size = wanted
 		panel_offsets[panel] = corner - (panel_homes[panel].call() as Vector2)  # undo the edge pinning
 		_place_panel(panel)
+
+
+## A copy of `icon` scaled by `factor`.
+func _shrunk_icon(icon: Texture2D, factor: float) -> Texture2D:
+	var image := icon.get_image()
+	if image == null:
+		return icon
+	image.resize(maxi(roundi(image.get_width() * factor), 1), maxi(roundi(image.get_height() * factor), 1), Image.INTERPOLATE_LANCZOS)
+	return ImageTexture.create_from_image(image)
 
 
 func _clamp_to_overlay(panel: PanelContainer, pos: Vector2) -> Vector2:
@@ -501,6 +651,15 @@ func _apply_font_delta(panel: PanelContainer) -> void:
 			node.add_theme_font_size_override("font_size", PANEL_FONT_SIZE + node.get_meta(&"font_extra") + delta)
 
 
+## Resizes `panel` to fit its contents with its top-left corner staying where
+## it was, so collapsing or expanding it doesn't make it jump (panels homed to
+## a bottom or right edge would otherwise resize toward that edge).
+func _refit_panel(panel: PanelContainer, corner: Vector2) -> void:
+	panel.reset_size()
+	panel_offsets[panel] = corner - (panel_homes[panel].call() as Vector2)
+	_place_panel(panel)
+
+
 ## Fills `panel` with a heading button that shows/hides a list. Returns the
 ## list container to add rows to. With `scroll_size`, the list sits in a
 ## scroll window of that size (its parent) instead of growing the panel.
@@ -536,7 +695,12 @@ func _make_collapsible(panel: PanelContainer, title_text: String, scroll_size :=
 		panel.custom_minimum_size = Vector2.ZERO  # forget a user-set size
 		_set_font_delta(panel, 0)
 		title.text = ("▼ " if open else "▶ ") + title_text
-		panel.reset_size.call_deferred()  # shrink the panel to fit
+		if panel.get_meta(&"expands", false):  # a docked panel that takes spare room only while open
+			panel.size_flags_vertical = Control.SIZE_EXPAND_FILL if open else Control.SIZE_SHRINK_BEGIN
+		if panel_homes.has(panel):
+			_refit_panel.call_deferred(panel, panel.position)
+		elif not panel.is_inside_tree():
+			panel.reset_size.call_deferred()  # shrink the panel to fit
 	title.pressed.connect(func() -> void:
 		if drag_distance < DRAG_THRESHOLD:  # a drag, not a click
 			set_open.call(not body.visible))
@@ -564,11 +728,12 @@ func _rebuild_legend() -> void:
 		if enemy >= 0:
 			label.text += " - at war with " + civ.factions[enemy].name
 		_set_font(label)
+		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_set_min_size(label, Vector2(150, 0))
 		row.add_child(label)
 		legend_list.add_child(row)
 	_apply_font_delta(legend_panel)
-	legend_panel.reset_size.call_deferred()
-	_place_legend.call_deferred()
 
 
 ## A faction expanded or founded a town: territory, roads and counts changed.
@@ -601,6 +766,10 @@ func _on_layer_toggled(pressed: bool, key: StringName) -> void:
 		list_hover = {}
 	trader_view.visible = layers.traders
 	army_view.visible = layers.armies
+	monster_view.visible = layers.monsters
+	player_view.visible = layers.player
+	disaster_view.visible = layers.disasters
+	player_panel.visible = layers.player
 	_sync_trader_view()
 	queue_redraw()
 
@@ -619,6 +788,7 @@ func _clear_hover() -> void:
 func _sync_trader_view() -> void:
 	trader_view.suppressed = hovered >= 0 or hovered_location >= 0
 	army_view.suppressed = hovered >= 0 or hovered_location >= 0
+	monster_view.suppressed = hovered >= 0 or hovered_location >= 0
 
 
 func _regenerate(new_seed: int) -> void:
@@ -635,9 +805,17 @@ func _regenerate(new_seed: int) -> void:
 	Production.assign_catchments(map, civ.settlements, civ.cell_faction)
 	TownResources.generate(map, civ.settlements, map_seed)
 	traders.spawn(map, civ.settlements, civ.factions, roads, map_seed)
+	Market.update_all(civ.settlements)
+	player.start(map, civ, roads, traders, map_seed)
+	player_was_moving = false
+	_set_paused(true)
+	camera.position = player.pos
+	_clamp_camera()
 	actions.setup(civ, map, roads, places.locations, map_seed)
 	events.setup(civ, map, map_seed)
+	disaster_view.clear()
 	war.setup(civ, map, roads, places.locations, map_seed)
+	monsters.setup(civ, map, roads, war, map_seed)
 	for line in log_list.get_children():
 		log_list.remove_child(line)
 		line.queue_free()
@@ -671,6 +849,17 @@ func _process(delta: float) -> void:
 	clock.advance(delta)
 	traders.update(clock.elapsed_hours)
 	war.update(clock.elapsed_hours)
+	monsters.update(clock.elapsed_hours)
+	player.update(clock.elapsed_hours)
+	# Time runs while the player walks and stops when they do. With
+	# allow_idle_play, pressing Play while standing still keeps it running
+	# until the next walk ends; without it, time stays stopped until they walk.
+	if player.is_moving() != player_was_moving:
+		player_was_moving = player.is_moving()
+		_set_paused(not player_was_moving)
+	elif not player_was_moving and not allow_idle_play and not clock.paused:
+		_set_paused(true)
+	_refresh_player_panel()
 	var dir := Vector2(
 		Input.get_axis(&"ui_left", &"ui_right") + float(Input.is_key_pressed(KEY_D)) - float(Input.is_key_pressed(KEY_A)),
 		float(Input.is_key_pressed(KEY_S)) - float(Input.is_key_pressed(KEY_W)))
@@ -693,11 +882,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			_zoom_at(click.position, ZOOM_STEP)
 		elif click.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			_zoom_at(click.position, 1.0 / ZOOM_STEP)
+		elif click.button_index == MOUSE_BUTTON_RIGHT:
+			_send_player(_world_mouse())
 
 
 ## Zooms by `factor`, keeping the world point under `screen_pos` fixed.
 func _zoom_at(screen_pos: Vector2, factor: float) -> void:
-	var center := get_viewport_rect().size * 0.5
+	var center := view_rect.get_center()
 	var old_zoom := camera.zoom.x
 	var new_zoom := clampf(old_zoom * factor, ZOOM_MIN, ZOOM_MAX)
 	var world := camera.position + (screen_pos - center) / old_zoom
@@ -710,7 +901,9 @@ func _zoom_at(screen_pos: Vector2, factor: float) -> void:
 
 ## Keeps the view inside the map (centered when the whole map fits).
 func _clamp_camera() -> void:
-	var half := get_viewport_rect().size * 0.5 / camera.zoom.x
+	# Camera2D centers on the whole window; shift it so `position` sits at the middle of the map area.
+	camera.offset = (get_viewport_rect().size * 0.5 - view_rect.get_center()) / camera.zoom.x
+	var half := view_rect.size * 0.5 / camera.zoom.x
 	var pos := camera.position
 	for axis in 2:
 		if half[axis] * 2.0 >= map.size[axis]:
@@ -722,12 +915,32 @@ func _clamp_camera() -> void:
 		queue_redraw()
 
 
+## The part of a window of `window_size` the map gets.
+func _view_rect_for(window_size: Vector2) -> Rect2:
+	return Rect2(SIDE_WIDTH, 0.0, window_size.x - SIDE_WIDTH, window_size.y - BOTTOM_HEIGHT)
+
+
+## Sizes the docks to the window and fits the map into the space left over.
+func _layout() -> void:
+	var window := overlay.size
+	view_rect = _view_rect_for(window)
+	sidebar.position = Vector2.ZERO
+	sidebar.size = Vector2(SIDE_WIDTH, window.y - BOTTOM_HEIGHT)
+	bottom_bar.position = Vector2(0.0, window.y - BOTTOM_HEIGHT)
+	bottom_bar.size = Vector2(window.x, BOTTOM_HEIGHT)
+	popups.view_end = view_rect.end
+	_clamp_camera()
+	if chart_panel.visible:
+		_place_panel(chart_panel)
+	queue_redraw()
+
+
 func _to_screen(world: Vector2) -> Vector2:
-	return (world - camera.position) * camera.zoom.x + get_viewport_rect().size * 0.5
+	return (world - camera.position) * camera.zoom.x + view_rect.get_center()
 
 
 func _world_mouse() -> Vector2:
-	var center := get_viewport_rect().size * 0.5
+	var center := view_rect.get_center()
 	return camera.position + (get_viewport().get_mouse_position() - center) / camera.zoom.x
 
 
@@ -748,6 +961,14 @@ func _update_hover() -> void:
 		hovered_cell = hc
 		queue_redraw()
 	_sync_trader_view()
+
+
+## Orders the player to walk to a spot (a settlement under the mouse wins).
+func _send_player(pos: Vector2) -> void:
+	var town := _settlement_at(pos)
+	var cell: int = civ.settlements[town].cell if town >= 0 else _cell_at(pos)
+	if cell >= 0 and not player.move_to(cell):
+		_log("You can't walk there")
 
 
 func _settlement_at(pos: Vector2) -> int:
@@ -796,12 +1017,16 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	match key.keycode:
 		KEY_SPACE:
 			_set_paused(not clock.paused)
+		KEY_C:
+			camera.position = player.pos
+			_clamp_camera()
+			queue_redraw()
 		KEY_ENTER, KEY_R:
 			_regenerate(randi())
 		KEY_EQUAL, KEY_KP_ADD:
-			_zoom_at(get_viewport_rect().size * 0.5, ZOOM_STEP)
+			_zoom_at(view_rect.get_center(), ZOOM_STEP)
 		KEY_MINUS, KEY_KP_SUBTRACT:
-			_zoom_at(get_viewport_rect().size * 0.5, 1.0 / ZOOM_STEP)
+			_zoom_at(view_rect.get_center(), 1.0 / ZOOM_STEP)
 		KEY_UP:
 			cell_count = mini(cell_count + 100, 3000)
 			_regenerate(map_seed)
@@ -841,7 +1066,7 @@ func _draw() -> void:
 		if loc.resource != &"":
 			kind = "%s %s" % [String(loc.resource).capitalize(), loc.kind]
 		_draw_popup(loc.name, kind, loc.cell, loc.faction, "Unclaimed", [] as Array[String])
-	elif hovered_cell >= 0 and not trader_hovered and not army_hovered:
+	elif hovered_cell >= 0 and not trader_hovered and not army_hovered and not monster_hovered and not disaster_hovered:
 		_draw_hex_popup(hovered_cell)
 
 
@@ -988,6 +1213,8 @@ func _draw_locations() -> void:
 func _settlement_lines(s: Dictionary) -> Array[String]:
 	var lines: Array[String] = ["Population: %d" % int(s.population)]
 	lines.append_array(TownResources.stock_lines(s.stock))
+	lines.append("Prices (gold):")
+	lines.append_array(Market.lines(s))
 	lines.append("Labor:")
 	lines.append_array(Labor.lines(s.labor))
 	return lines

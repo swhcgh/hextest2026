@@ -12,7 +12,7 @@ extends RefCounted
 ##  - capture: take an enemy hex bordering its own land (and any town on it)
 ##  - raid: loot an enemy settlement of part of its stock
 ## The target's defenders are a militia drawn from the nearest town's people.
-## Armies of enemies that meet in the field fight too, and a beaten army
+## Armies can also be sent to defend against monsters (see Monsters). Armies of enemies that meet in the field fight too, and a beaten army
 ## retreats home. Survivors rejoin the towns that sent them, with any loot. Food
 ## for armies in the field is ignored for now.
 ##
@@ -48,6 +48,8 @@ const LEVY_MIN := 0.10
 const LEVY_MAX := 0.20  # share of a town's people it may send
 const KEEP_POPULATION := 30.0  # a town never levies below this
 const MIN_ARMY := 15
+const DEFENSE_LEVY_MAX := 0.35  # a town under threat sends more of its people
+const MIN_DEFENSE := 10
 ## Goods to arm and equip one man, paid by the faction's towns, richest first.
 const COST_PER_MAN := {
 	&"gold": 0.3, &"ore": 0.25, &"wood": 0.1, &"textiles": 0.1, &"grain": 0.08, &"meat": 0.06,
@@ -260,22 +262,9 @@ func _raise_army(f: int, enemy: int) -> void:
 	towns.assign(_civ.factions[f].settlements)
 	towns.sort_custom(func(a: int, b: int) -> bool: return _gap_to(a, enemy_towns) < _gap_to(b, enemy_towns))
 
-	var levy: Dictionary[int, int] = {}
-	var men := 0
-	for s in towns.slice(0, LEVY_TOWNS):
-		var pop: float = _civ.settlements[s].population
-		var take := mini(int(pop * _rng.randf_range(LEVY_MIN, LEVY_MAX)), int(pop - KEEP_POPULATION))
-		if take > 0:
-			levy[s] = take
-			men += take
-	# Shrink the levy to what the faction can pay to equip.
-	var affordable := _affordable_men(f)
-	if men > affordable:
-		for s in levy:
-			levy[s] = int(levy[s] * float(affordable) / men)
-		men = 0
-		for s in levy:
-			men += levy[s]
+	var muster := _muster(f, towns)
+	var levy: Dictionary[int, int] = muster.levy
+	var men: int = muster.men
 	if men < MIN_ARMY:
 		return
 
@@ -297,6 +286,65 @@ func _raise_army(f: int, enemy: int) -> void:
 	})
 	var verb := "to take land near" if goal.kind == &"capture" else "to raid"
 	event_occurred.emit("%s sent %d men %s %s" % [_civ.factions[f].name, men, verb, goal.name])
+
+
+## Draws men from the first LEVY_TOWNS of `towns`, shrunk to what the faction
+## can pay to equip (unless `must_afford` is off, as when defending home: the
+## men then take what gear there is). Returns {levy (settlement -> men), men}; nothing is taken yet.
+func _muster(f: int, towns: Array[int], must_afford := true, max_share := LEVY_MAX) -> Dictionary:
+	var levy: Dictionary[int, int] = {}
+	var men := 0
+	for s in towns.slice(0, LEVY_TOWNS):
+		var pop: float = _civ.settlements[s].population
+		var take := mini(int(pop * _rng.randf_range(LEVY_MIN, max_share)), int(pop - KEEP_POPULATION))
+		if take > 0:
+			levy[s] = take
+			men += take
+	var affordable := _affordable_men(f) if must_afford else men
+	if men > affordable:
+		for s in levy:
+			levy[s] = int(levy[s] * float(affordable) / men)
+		men = 0
+		for s in levy:
+			men += levy[s]
+	return {"levy": levy, "men": men}
+
+
+## Sends an army to `cell` to drive off a monster that has attacked the
+## faction's land, unless it already has one in the field or can't field one.
+func raise_defense(f: int, cell: int, label: String) -> void:
+	if _army_index(f) >= 0 or _civ.factions[f].settlements.is_empty():
+		return
+	var towns: Array[int] = []
+	towns.assign(_civ.factions[f].settlements)
+	var site: Vector2 = _map.cells[cell].site
+	towns.sort_custom(func(a: int, b: int) -> bool:
+		return _map.cells[_civ.settlements[a].cell].site.distance_squared_to(site) < _map.cells[_civ.settlements[b].cell].site.distance_squared_to(site))
+	var muster := _muster(f, towns, false, DEFENSE_LEVY_MAX)
+	var levy: Dictionary[int, int] = muster.levy
+	var men: int = muster.men
+	if men < MIN_DEFENSE:
+		return
+	# The army gathers at the nearest town that isn't the one under attack.
+	var start_cell := -1
+	for s in levy:
+		if _civ.settlements[s].cell != cell:
+			start_cell = _civ.settlements[s].cell
+			break
+	if start_cell < 0:
+		return
+	var path := _roads.find_path(start_cell, cell)
+	if path.size() < 2:
+		return
+	for s in levy:
+		_civ.settlements[s].population -= levy[s]
+	_pay(f, _equipment_cost(men))
+	armies.append({
+		"faction": f, "enemy": -1, "men": men, "levy": levy, "plunder": {},
+		"goal": {"kind": &"defend", "cell": cell, "name": label}, "phase": &"marching", "path": path,
+		"segment": 0, "progress": 0.0, "pos": _map.cells[start_cell].site, "no_clash": 0.0, "routed": false,
+	})
+	event_occurred.emit("%s sent %d men to drive the monster from %s" % [_civ.factions[f].name, men, label])
 
 
 ## The goods it takes to equip `men`.
@@ -346,7 +394,7 @@ func _pick_goal(f: int, enemy: int, men: int, start_cell: int) -> Dictionary:
 		if _civ.cell_faction[i] != enemy or _roads.landmass[i] != land or i == enemy_capital_cell:
 			continue
 		if _borders(i, f):
-			var town := _settlement_at(i)
+			var town := settlement_at(i)
 			captures.append(_goal(&"capture", i, men, 2.5 if town >= 0 else 1.0))
 	for s: int in _civ.factions[enemy].settlements:
 		var cell: int = _civ.settlements[s].cell
@@ -371,15 +419,15 @@ func _pick_goal(f: int, enemy: int, men: int, start_cell: int) -> Dictionary:
 
 func _goal(kind: StringName, cell: int, men: int, value: float) -> Dictionary:
 	var owner := _civ.cell_faction[cell]
-	var town := _settlement_at(cell)
+	var town := settlement_at(cell)
 	var label := "the border"
 	if town >= 0:
 		label = _civ.settlements[town].name
 	else:
-		var near := _nearest_settlement(cell, owner)
+		var near := nearest_settlement(cell, owner)
 		if near >= 0:
 			label = _civ.settlements[near].name
-	var defense := _militia(cell, owner)
+	var defense := militia(cell, owner)
 	return {"kind": kind, "cell": cell, "name": label,
 			"score": value - 1.5 * defense / maxf(men, 1.0) + _rng.randf() * 0.4}
 
@@ -388,7 +436,7 @@ func _goal(kind: StringName, cell: int, men: int, value: float) -> Dictionary:
 
 ## Both sides roll a d6 that scales their strength; the higher total wins.
 ## Returns {attacker_won, attacker_loss, defender_loss}.
-func _roll_battle(attackers: int, defenders: int) -> Dictionary:
+func roll_battle(attackers: int, defenders: int) -> Dictionary:
 	var a := attackers * (1.0 + BATTLE_SWING * (_rng.randi_range(1, 6) - 3.5))
 	var d := defenders * (1.0 + BATTLE_SWING * (_rng.randi_range(1, 6) - 3.5))
 	var attacker_won := a > d
@@ -406,13 +454,13 @@ func _roll_battle(attackers: int, defenders: int) -> Dictionary:
 
 ## Defenders at a hex: the settlement's militia, or a thin screen drawn from
 ## the nearest town of the owner.
-func _militia(cell: int, faction: int) -> int:
-	var town := _settlement_at(cell)
+func militia(cell: int, faction: int) -> int:
+	var town := settlement_at(cell)
 	if town >= 0:
 		var s := _civ.settlements[town]
 		var share: float = MILITIA_SHARE[s.kind] * (CAPITAL_BONUS if s.is_capital else 1.0)
 		return int(s.population * share)
-	var near := _nearest_settlement(cell, faction)
+	var near := nearest_settlement(cell, faction)
 	return int(_civ.settlements[near].population * OPEN_FIELD_MILITIA) if near >= 0 else 0
 
 
@@ -420,18 +468,21 @@ func _arrive(army: Dictionary) -> void:
 	if army.phase == &"returning":
 		_come_home(army)
 		return
+	if army.goal.kind == &"defend":
+		retreat(army)  # the monster is fought where it stands (see Monsters)
+		return
 	var f: int = army.faction
 	var enemy: int = army.enemy
 	var goal: Dictionary = army.goal
 	var war_index := _war_index(f)
-	var town := _settlement_at(goal.cell)
+	var town := settlement_at(goal.cell)
 	var still_there: bool = _civ.cell_faction[goal.cell] == enemy and (goal.kind == &"capture" or (town >= 0 and _civ.settlements[town].faction == enemy))
 	if still_there:
-		var result := _roll_battle(army.men, _militia(goal.cell, enemy))
+		var result := roll_battle(army.men, militia(goal.cell, enemy))
 		if war_index >= 0:
 			wars[war_index].actions += 1
 		army.men -= result.attacker_loss
-		var local := town if town >= 0 else _nearest_settlement(goal.cell, enemy)
+		var local := town if town >= 0 else nearest_settlement(goal.cell, enemy)
 		if local >= 0:
 			_civ.settlements[local].population = maxf(_civ.settlements[local].population - result.defender_loss, 1.0)
 		var fname: String = _civ.factions[f].name
@@ -449,9 +500,9 @@ func _arrive(army: Dictionary) -> void:
 		else:
 			event_occurred.emit("%s's army was beaten at %s, losing %d men" % [fname, goal.name, result.attacker_loss])
 	if army.men <= 0:
-		_disband(army)
+		disband(army)
 	else:
-		_retreat(army)
+		retreat(army)
 
 
 ## Loots a share of the settlement's stock. Returns the number of goods.
@@ -484,7 +535,7 @@ func _check_clashes() -> void:
 
 
 func _clash(a: Dictionary, b: Dictionary) -> void:
-	var result := _roll_battle(a.men, b.men)
+	var result := roll_battle(a.men, b.men)
 	var war_index := _war_index(a.faction)
 	if war_index >= 0:
 		wars[war_index].actions += 1
@@ -502,18 +553,18 @@ func _clash(a: Dictionary, b: Dictionary) -> void:
 			maxi(result.attacker_loss, 0), maxi(result.defender_loss, 0)])
 	for army in [loser, winner]:
 		if army.men <= 0:
-			_disband(army)
+			disband(army)
 	if loser.men > 0:
 		loser.routed = true
-		_retreat(loser)
+		retreat(loser)
 
 
 # --- moving and returning ------------------------------------------------
 
 ## Turns the army around toward the nearest of its faction's towns.
-func _retreat(army: Dictionary) -> void:
+func retreat(army: Dictionary) -> void:
 	var from: int = army.path[army.segment]
-	var home := _nearest_settlement(from, army.faction)
+	var home := nearest_settlement(from, army.faction)
 	var path: Array[int] = []
 	if home >= 0:
 		path = _roads.find_path(from, _civ.settlements[home].cell)
@@ -529,7 +580,7 @@ func _retreat(army: Dictionary) -> void:
 ## Called when the war ends: armies in the field head home.
 func _recall(army: Dictionary) -> void:
 	if army.phase != &"returning":
-		_retreat(army)
+		retreat(army)
 
 
 ## The army reaches home: survivors rejoin the towns that sent them, with the
@@ -559,7 +610,7 @@ func _come_home(army: Dictionary) -> void:
 
 
 ## An army wiped out in battle: nobody comes home.
-func _disband(army: Dictionary) -> void:
+func disband(army: Dictionary) -> void:
 	armies.erase(army)
 	_pause[army.faction] = _day + _rng.randi_range(CAMPAIGN_PAUSE.x, CAMPAIGN_PAUSE.y)
 	event_occurred.emit("The army of %s was destroyed" % _civ.factions[army.faction].name)
@@ -624,7 +675,7 @@ func _gap_to(settlement: int, others: Array[int]) -> float:
 
 
 ## Living settlement on a cell, or -1.
-func _settlement_at(cell: int) -> int:
+func settlement_at(cell: int) -> int:
 	for i in _civ.settlements.size():
 		if _civ.settlements[i].cell == cell and not _civ.settlements[i].ruined:
 			return i
@@ -632,7 +683,7 @@ func _settlement_at(cell: int) -> int:
 
 
 ## The faction's settlement nearest a cell, or -1.
-func _nearest_settlement(cell: int, faction: int) -> int:
+func nearest_settlement(cell: int, faction: int) -> int:
 	if faction < 0:
 		return -1
 	var site: Vector2 = _map.cells[cell].site
