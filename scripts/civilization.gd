@@ -5,7 +5,7 @@ extends RefCounted
 ## A region is simply the land a faction controls. Land no faction reaches
 ## (faction -1) is independent and has no region.
 ##
-## settlement: cell, name, kind (&"city"/&"town"), faction, is_capital,
+## settlement: cell, name, kind (&"city"/&"town"), faction, is_capital, ruined,
 ##   stock (goods in store) and population, both added by TownResources
 ## faction: name, color, capital (settlement index), settlements (Array[int]),
 ##   border (flat point pairs outlining the faction's whole territory, inset into it)
@@ -85,6 +85,7 @@ func _place_settlements() -> void:
 			"kind": &"city" if i < city_count else &"town",
 			"faction": -1,
 			"is_capital": false,
+			"ruined": false,
 		})
 
 
@@ -217,6 +218,7 @@ func _ensure_towns() -> void:
 					"kind": &"town",
 					"faction": f,
 					"is_capital": false,
+					"ruined": false,
 				})
 				factions[f].settlements.append(settlements.size() - 1)
 				break
@@ -344,9 +346,22 @@ func add_settlement(cell: int, faction: int) -> int:
 		"kind": &"town",
 		"faction": faction,
 		"is_capital": false,
+		"ruined": false,
 	})
 	factions[faction].settlements.append(settlements.size() - 1)
 	return settlements.size() - 1
+
+
+## Reduces a settlement to ruins: nobody lives there, its stock is gone, and it
+## leaves its faction's roster. Its entry stays so settlement indices hold.
+func ruin_settlement(i: int) -> void:
+	var s := settlements[i]
+	s.ruined = true
+	s.population = 0.0
+	for r: StringName in s.stock:
+		s.stock[r] = 0
+	if s.faction >= 0:
+		factions[s.faction].settlements.erase(i)
 
 
 ## Random color whose hue is not too close to an already used one.

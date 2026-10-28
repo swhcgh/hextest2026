@@ -49,12 +49,18 @@ const LAYERS := [
 	[&"settlements", "Settlements"],
 	[&"locations", "Locations"],
 	[&"traders", "Traders"],
-	[&"labels", "City names"],
+	[&"disasters", "Disasters"],
+	[&"labels", "Settlement names"],
+	[&"places_list", "Location list"],
 	[&"legend", "Legend"],
 	[&"log", "Event log"],
 ]
 const PANEL_FONT_SIZE := 11
-const MAX_LOG_LINES := 8
+const MAX_LOG_LINES := 500
+const LOG_SIZE := Vector2(380, 120)  # default size of the scrolling log
+const PLACES_SIZE := Vector2(210, 170)  # default size of the location list
+const HIGHLIGHT_COLOR := Color("ffe14a")
+const RUIN_COLOR := Color("b08a68")
 const ZOOM_MIN := 1.0
 const ZOOM_MAX := 4.0
 const ZOOM_STEP := 1.15
@@ -69,9 +75,15 @@ var legend_panel := PanelContainer.new()
 var clock := WorldClock.new()
 var log_panel := PanelContainer.new()
 var log_list: VBoxContainer
+var log_scroll: ScrollContainer
+var places_panel := PanelContainer.new()
+var places_list: VBoxContainer
+var list_hover := {}  # {name, cell} of the location list row under the mouse, or empty
 var traders := Traders.new()
 var actions := FactionActions.new()
+var events := WorldEvents.new()
 var trader_view := TraderView.new()
+var popups := PopupLayer.new()  # hover popups, above every panel
 var clock_panel := PanelContainer.new()
 var layers_panel := PanelContainer.new()
 var panel_homes: Dictionary[PanelContainer, Callable] = {}  # PanelContainer -> Callable returning its default position
@@ -98,6 +110,8 @@ func _ready() -> void:
 	map.size = get_viewport_rect().size
 	camera.position = map.size * 0.5
 	add_child(camera)
+	add_child(popups)
+	trader_view.popups = popups
 	trader_view.traders = traders
 	trader_view.hover_changed.connect(func(over: bool) -> void:
 		trader_hovered = over
@@ -106,8 +120,9 @@ func _ready() -> void:
 	add_child(trader_view)
 	clock.hour_passed.connect(_on_hour_passed)
 	clock.day_passed.connect(actions.on_day)
+	clock.day_passed.connect(func() -> void: events.on_day(clock.total_days))
 	clock.day_passed.connect(func() -> void:
-		Production.collect_daily(map, civ.settlements, clock.total_days)
+		Production.collect_daily(map, civ.settlements, clock.total_days, events.farm_mult)
 		for line in Upkeep.apply_daily(civ.settlements, clock.total_days):
 			_log(line)
 		history.record(civ, clock.total_days)
@@ -115,6 +130,9 @@ func _ready() -> void:
 			chart_panel.refresh())
 	actions.changed.connect(_on_world_changed)
 	actions.action_taken.connect(_log)
+	events.event_occurred.connect(_log)
+	events.towns_lost.connect(_on_world_changed)
+	events.changed.connect(queue_redraw)
 	_build_ui()
 	_regenerate(randi())
 
@@ -157,8 +175,17 @@ func _build_ui() -> void:
 	_make_draggable(log_panel, func() -> Vector2: return Vector2(8.0, overlay.size.y - log_panel.size.y - 8.0))
 	log_panel.resized.connect(_place_log)
 	overlay.resized.connect(_place_log)
-	log_list = _make_collapsible(log_panel, "Event log")
+	log_list = _make_collapsible(log_panel, "Event log", LOG_SIZE)
+	log_scroll = log_list.get_parent()
 	overlay.add_child(log_panel)
+
+	# Every settlement and location by name, bottom-right. Mousing over a row
+	# marks that place on the map.
+	_make_draggable(places_panel, func() -> Vector2: return overlay.size - places_panel.size - Vector2(8.0, 8.0))
+	places_panel.resized.connect(_place_places)
+	overlay.resized.connect(_place_places)
+	places_list = _make_collapsible(places_panel, "Locations", PLACES_SIZE)
+	overlay.add_child(places_panel)
 
 	# Faction summary, top-right; re-pinned to the right edge whenever its size
 	# (or the window's) changes.
@@ -230,7 +257,7 @@ func _build_clock_panel() -> void:
 		if v >= WorldClock.HOURS_PER_DAY * 7:
 			speed_label.text = "1 week/s"
 		elif v >= WorldClock.HOURS_PER_DAY:
-			speed_label.text = "%.3g days/s" % (v / WorldClock.HOURS_PER_DAY)
+			speed_label.text = "%s days/s" % String.num(snappedf(v / WorldClock.HOURS_PER_DAY, 0.01)).trim_suffix(".0")
 		else:
 			speed_label.text = "%d h/s" % v
 	slider.value_changed.connect(update_speed)
@@ -269,8 +296,12 @@ func _place_log() -> void:
 
 ## Appends a dated line to the event log, dropping the oldest beyond the limit.
 func _log(text: String) -> void:
+	var bar := log_scroll.get_v_scroll_bar()
+	var following := bar.value + bar.page >= bar.max_value - 4.0  # don't yank a reader who scrolled up
 	var label := Label.new()
 	label.text = "%s  %s" % [clock.short_text(), text]
+	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_set_font(label)
 	log_list.add_child(label)
 	while log_list.get_child_count() > MAX_LOG_LINES:
@@ -278,12 +309,63 @@ func _log(text: String) -> void:
 		log_list.remove_child(oldest)
 		oldest.queue_free()
 	_apply_font_delta(log_panel)
-	_resize_log.call_deferred()
+	if following:
+		_scroll_log_to_end.call_deferred()
 
 
-func _resize_log() -> void:
-	log_panel.reset_size()
-	_place_log()
+## Waits a frame for the new line to be laid out, then shows the newest lines.
+func _scroll_log_to_end() -> void:
+	await get_tree().process_frame
+	log_scroll.scroll_vertical = int(log_scroll.get_v_scroll_bar().max_value)
+
+
+func _place_places() -> void:
+	_place_panel(places_panel)
+
+
+## Rebuilds the location list: living settlements and locations, A to Z.
+func _rebuild_places() -> void:
+	list_hover = {}
+	for row in places_list.get_children():
+		places_list.remove_child(row)
+		row.queue_free()
+	var entries: Array[Dictionary] = []
+	for s in civ.settlements:
+		if not s.ruined:
+			entries.append({"name": s.name, "kind": "Capital" if s.is_capital else String(s.kind).capitalize(), "cell": s.cell})
+	for loc in places.locations:
+		entries.append({"name": loc.name, "kind": String(loc.kind).capitalize(), "cell": loc.cell})
+	entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.name.naturalnocasecmp_to(b.name) < 0)
+
+	var idle := StyleBoxEmpty.new()
+	var over := StyleBoxFlat.new()
+	over.bg_color = Color(1, 1, 1, 0.18)
+	for box: StyleBox in [idle, over]:
+		box.content_margin_left = 3
+		box.content_margin_right = 3
+		box.content_margin_top = 1
+		box.content_margin_bottom = 1
+	for e in entries:
+		var row := Button.new()
+		row.text = "%s  ·  %s" % [e.name, e.kind]
+		row.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		row.focus_mode = Control.FOCUS_NONE
+		row.clip_text = true
+		for state: String in ["normal", "pressed", "focus"]:
+			row.add_theme_stylebox_override(state, idle)
+		row.add_theme_stylebox_override("hover", over)
+		row.add_theme_stylebox_override("hover_pressed", over)
+		_set_font(row)
+		row.mouse_entered.connect(func() -> void:
+			list_hover = e
+			queue_redraw())
+		row.mouse_exited.connect(func() -> void:
+			if list_hover == e:
+				list_hover = {}
+				queue_redraw())
+		places_list.add_child(row)
+	_apply_font_delta(places_panel)
+	queue_redraw()
 
 
 func _place_legend() -> void:
@@ -404,8 +486,9 @@ func _apply_font_delta(panel: PanelContainer) -> void:
 
 
 ## Fills `panel` with a heading button that shows/hides a list. Returns the
-## list container to add rows to.
-func _make_collapsible(panel: PanelContainer, title_text: String) -> VBoxContainer:
+## list container to add rows to. With `scroll_size`, the list sits in a
+## scroll window of that size (its parent) instead of growing the panel.
+func _make_collapsible(panel: PanelContainer, title_text: String, scroll_size := Vector2.ZERO) -> VBoxContainer:
 	panel.mouse_entered.connect(_clear_hover)
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 0)
@@ -419,9 +502,18 @@ func _make_collapsible(panel: PanelContainer, title_text: String) -> VBoxContain
 	title.gui_input.connect(_on_panel_gui_input.bind(panel))  # drag by the heading too
 	var list := VBoxContainer.new()
 	list.add_theme_constant_override("separation", 0)
-	box.add_child(list)
+	var body: Control = list
+	if scroll_size != Vector2.ZERO:
+		var scroll := ScrollContainer.new()
+		scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+		scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		_set_min_size(scroll, scroll_size)
+		list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		scroll.add_child(list)
+		body = scroll
+	box.add_child(body)
 	var set_open := func(open: bool) -> void:
-		list.visible = open
+		body.visible = open
 		panel.set_meta(&"collapsed", not open)
 		if panel_grips.has(panel):
 			panel_grips[panel].visible = panel.visible and open
@@ -431,7 +523,7 @@ func _make_collapsible(panel: PanelContainer, title_text: String) -> VBoxContain
 		panel.reset_size.call_deferred()  # shrink the panel to fit
 	title.pressed.connect(func() -> void:
 		if drag_distance < DRAG_THRESHOLD:  # a drag, not a click
-			set_open.call(not list.visible))
+			set_open.call(not body.visible))
 	set_open.call(true)
 	return list
 
@@ -462,6 +554,7 @@ func _rebuild_legend() -> void:
 ## A faction expanded or founded a town: territory, roads and counts changed.
 func _on_world_changed() -> void:
 	_rebuild_legend()
+	_rebuild_places()
 	queue_redraw()
 
 
@@ -483,6 +576,9 @@ func _on_layer_toggled(pressed: bool, key: StringName) -> void:
 		hovered_cell = -1
 	legend_panel.visible = layers.legend
 	log_panel.visible = layers.log
+	places_panel.visible = layers.places_list
+	if not layers.places_list:
+		list_hover = {}
 	trader_view.visible = layers.traders
 	_sync_trader_view()
 	queue_redraw()
@@ -518,10 +614,12 @@ func _regenerate(new_seed: int) -> void:
 	TownResources.generate(map, civ.settlements, map_seed)
 	traders.spawn(map, civ.settlements, civ.factions, roads, map_seed)
 	actions.setup(civ, map, roads, places.locations, map_seed)
+	events.setup(civ, map, map_seed)
 	for line in log_list.get_children():
 		log_list.remove_child(line)
 		line.queue_free()
 	_rebuild_legend()
+	_rebuild_places()
 	clock.reset()
 	history.reset()
 	history.record(civ, 0)
@@ -596,6 +694,12 @@ func _clamp_camera() -> void:
 		else:
 			pos[axis] = clampf(pos[axis], half[axis], map.size[axis] - half[axis])
 	camera.position = pos
+	if hovered >= 0 or hovered_location >= 0 or hovered_cell >= 0:
+		queue_redraw()
+
+
+func _to_screen(world: Vector2) -> Vector2:
+	return (world - camera.position) * camera.zoom.x + get_viewport_rect().size * 0.5
 
 
 func _world_mouse() -> Vector2:
@@ -626,6 +730,8 @@ func _settlement_at(pos: Vector2) -> int:
 	var best := -1
 	var best_dist := HOVER_RADIUS
 	for i in civ.settlements.size():
+		if civ.settlements[i].ruined:
+			continue
 		var d := pos.distance_to(map.cells[civ.settlements[i].cell].site)
 		if d <= best_dist:
 			best_dist = d
@@ -688,6 +794,8 @@ func _draw() -> void:
 		_draw_rivers()
 	if layers.roads:
 		_draw_roads()
+	if layers.disasters:
+		_draw_disasters()
 	if layers.faction_borders:
 		for f in civ.factions:
 			draw_multiline(f.border, f.color, 3.0)
@@ -697,6 +805,9 @@ func _draw() -> void:
 		_draw_settlements()
 	if layers.locations:
 		_draw_locations()
+	popups.clear_popup(self)
+	if not list_hover.is_empty():
+		_draw_list_highlight()
 	if hovered >= 0:
 		var s := civ.settlements[hovered]
 		_draw_popup(s.name, "Capital city" if s.is_capital else String(s.kind).capitalize(), s.cell, s.faction, "Independent", _settlement_lines(s))
@@ -708,6 +819,17 @@ func _draw() -> void:
 		_draw_popup(loc.name, kind, loc.cell, loc.faction, "Unclaimed", [] as Array[String])
 	elif hovered_cell >= 0 and not trader_hovered:
 		_draw_hex_popup(hovered_cell)
+
+
+## Rings the place under the mouse in the location list, with its name.
+func _draw_list_highlight() -> void:
+	var p: Vector2 = map.cells[list_hover.cell].site
+	var font := ThemeDB.fallback_font
+	draw_arc(p, 13.0, 0.0, TAU, 32, Color.BLACK, 5.0)
+	draw_arc(p, 13.0, 0.0, TAU, 32, HIGHLIGHT_COLOR, 3.0)
+	var label_pos := p + Vector2(16, -10)
+	draw_string_outline(font, label_pos, list_hover.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, 4, Color.BLACK)
+	draw_string(font, label_pos, list_hover.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, HIGHLIGHT_COLOR)
 
 
 func _draw_cells() -> void:
@@ -745,6 +867,22 @@ func _draw_roads() -> void:
 	draw_multiline(roads.points, ROAD_COLOR, 2.0)
 
 
+## Tints the cells each recent disaster reached, strongest near its epicenter,
+## fading as it passes.
+func _draw_disasters() -> void:
+	for e in events.active:
+		var color: Color = WorldEvents.KINDS[e.kind].color
+		var fade := events.fade(e)
+		for i: int in e.cells:
+			var poly: PackedVector2Array = map.cells[i].polygon
+			if not map.cells[i].is_land or poly.size() < 3:
+				continue
+			draw_colored_polygon(poly, Color(color, color.a * e.cells[i] * fade))
+		var ring := Color(color, fade)
+		draw_arc(map.cells[e.center].site, 10.0, 0.0, TAU, 24, Color.BLACK, 4.0)
+		draw_arc(map.cells[e.center].site, 10.0, 0.0, TAU, 24, ring, 2.0)
+
+
 func _draw_region_highlight(faction: int) -> void:
 	var glow := Color(1, 1, 1, 0.18)
 	for i in map.cells.size():
@@ -759,6 +897,21 @@ func _draw_settlements() -> void:
 	var font := ThemeDB.fallback_font
 	for s in civ.settlements:
 		var p: Vector2 = map.cells[s.cell].site
+		if s.ruined:  # a hollow ring the size of the old marker, crossed out, named
+			var is_city: bool = s.kind == &"city"
+			var r := 6.0 if is_city else 3.5
+			var k := r * 0.6
+			for pass_color: Array in [[Color.BLACK, 3.0], [RUIN_COLOR, 1.5]]:
+				draw_arc(p, r, 0.0, TAU, 16, pass_color[0], pass_color[1])
+				draw_line(p + Vector2(-k, -k), p + Vector2(k, k), pass_color[0], pass_color[1])
+				draw_line(p + Vector2(-k, k), p + Vector2(k, -k), pass_color[0], pass_color[1])
+			if layers.labels:
+				var label_pos := p + (Vector2(9, 4) if is_city else Vector2(6, 3))
+				var label_size := 13 if is_city else 9
+				var label_text: String = "%s (ruins)" % s.name
+				draw_string_outline(font, label_pos, label_text, HORIZONTAL_ALIGNMENT_LEFT, -1, label_size, 3, Color.BLACK)
+				draw_string(font, label_pos, label_text, HORIZONTAL_ALIGNMENT_LEFT, -1, label_size, RUIN_COLOR)
+			continue
 		if s.kind == &"city":
 			if s.is_capital:
 				draw_circle(p, 9.0, Color.BLACK)
@@ -772,6 +925,10 @@ func _draw_settlements() -> void:
 		else:
 			draw_circle(p, 3.5, Color.BLACK)
 			draw_circle(p, 2.5, Color("dddddd"))
+			if layers.labels:
+				var label_pos := p + Vector2(6, 3)
+				draw_string_outline(font, label_pos, s.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 9, 3, Color.BLACK)
+				draw_string(font, label_pos, s.name, HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color("e6e6e6"))
 
 
 func _draw_locations() -> void:
@@ -833,8 +990,7 @@ func _draw_hex_popup(i: int) -> void:
 	else:
 		lines.append("Produces per day:")
 		lines.append_array(produced)
-	var view_end := camera.position + get_viewport_rect().size * 0.5 / camera.zoom.x
-	PopupBox.draw(self, lines, cell.site, view_end, color, 1)
+	popups.set_popup(self, lines, _to_screen(cell.site), color, 1)
 
 
 func _draw_popup(title: String, kind: String, cell: int, faction: int, no_faction_text: String, extra_lines: Array[String]) -> void:
@@ -845,6 +1001,4 @@ func _draw_popup(title: String, kind: String, cell: int, faction: int, no_factio
 		faction_color = civ.factions[faction].color
 	var lines: Array[String] = [title, kind, faction_name]
 	lines.append_array(extra_lines)
-	# Keep the popup inside the part of the map currently on screen.
-	var view_end := camera.position + get_viewport_rect().size * 0.5 / camera.zoom.x
-	PopupBox.draw(self, lines, map.cells[cell].site, view_end, faction_color, 2)
+	popups.set_popup(self, lines, _to_screen(map.cells[cell].site), faction_color, 2)

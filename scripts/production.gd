@@ -89,6 +89,8 @@ static func assign_catchments(map: VoronoiMap, settlements: Array[Dictionary], c
 		cell.town_steps = 0
 	var frontier: Array[int] = []
 	for i in settlements.size():
+		if settlements[i].ruined:
+			continue
 		var c: int = settlements[i].cell
 		cells[c].town = i
 		frontier.append(c)
@@ -110,8 +112,10 @@ static func yield_at(steps: int) -> float:
 
 
 ## One day of collection: every town gets the yield of the hexes assigned to
-## it (grain and meat scaled by the season), plus taxes. Fractions carry over between days in settlement.carry.
-static func collect_daily(map: VoronoiMap, settlements: Array[Dictionary], total_days: int = 0) -> void:
+## it (grain and meat scaled by the season and by farm_mult, a per-cell
+## multiplier such as a drought's), plus taxes. Fractions carry over between
+## days in settlement.carry. Ruins collect nothing.
+static func collect_daily(map: VoronoiMap, settlements: Array[Dictionary], total_days: int = 0, farm_mult: Dictionary = {}) -> void:
 	var harvest := Upkeep.harvest_factor(total_days)
 	var income: Array[Dictionary] = []
 	for s in settlements:
@@ -119,15 +123,20 @@ static func collect_daily(map: VoronoiMap, settlements: Array[Dictionary], total
 		for r in TownResources.RESOURCES:
 			zero[r] = 0.0
 		income.append(zero)
-	for cell in map.cells:
+	for c in map.cells.size():
+		var cell := map.cells[c]
 		if cell.town < 0:
 			continue
 		var share := yield_at(cell.town_steps)
+		var farm: float = farm_mult.get(c, 1.0)
 		for r: StringName in cell.production:
-			income[cell.town][r] += cell.production[r] * share
+			var factor := farm if r == &"grain" or r == &"meat" else 1.0
+			income[cell.town][r] += cell.production[r] * share * factor
 
 	for i in settlements.size():
 		var s := settlements[i]
+		if s.ruined:
+			continue
 		var multiplier := CITY_MULTIPLIER if s.kind == &"city" else 1.0
 		if not s.has("carry"):
 			s["carry"] = {}

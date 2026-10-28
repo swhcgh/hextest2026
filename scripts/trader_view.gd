@@ -7,6 +7,7 @@ const HOVER_RADIUS := 10.0
 
 var traders: Traders
 var settlements: Array[Dictionary]
+var popups: PopupLayer
 ## Set by the map when a settlement or location is already being hovered, so
 ## traders don't compete with their popups.
 var suppressed := false
@@ -19,6 +20,7 @@ signal hover_changed(over_trader: bool)
 
 func _process(_delta: float) -> void:
 	if not visible:
+		popups.clear_popup(self)
 		return
 	var was_hovered := _hovered >= 0
 	_hovered = -1
@@ -44,10 +46,12 @@ func _draw() -> void:
 		draw_circle(t.pos, 6.0 if highlighted else 4.5, Color.WHITE if highlighted else Color.BLACK)
 		draw_circle(t.pos, 3.2, traders.color_of(t))
 	if _hovered >= 0:
-		_draw_popup(traders.traders[_hovered])
+		_show_popup(traders.traders[_hovered])
+	else:
+		popups.clear_popup(self)
 
 
-func _draw_popup(t: Dictionary) -> void:
+func _show_popup(t: Dictionary) -> void:
 	var status := "Resting in %s" % settlements[t.at].name if t.dest < 0 else ("Returning to %s" if t.returning else "Heading to %s") % settlements[t.dest].name
 	var lines: Array[String] = ["Trader", traders.faction_name_of(t), status, "Trades made: %d" % t.trades]
 	var cargo := TownResources.stock_lines(t.cargo)
@@ -56,5 +60,4 @@ func _draw_popup(t: Dictionary) -> void:
 	else:
 		lines.append("Carrying:")
 		lines.append_array(cargo)
-	var view_end := get_canvas_transform().affine_inverse() * get_viewport_rect().size
-	PopupBox.draw(self, lines, t.pos, view_end, traders.color_of(t), 1)
+	popups.set_popup(self, lines, get_canvas_transform() * t.pos, traders.color_of(t), 1)

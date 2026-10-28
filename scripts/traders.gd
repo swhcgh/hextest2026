@@ -117,13 +117,16 @@ func update(delta_hours: float) -> void:
 
 func _depart(t: Dictionary) -> void:
 	var home: int = t.home
+	if _settlements[home].ruined:
+		_rehome(t)
+		return
 	var from_cell: int = _settlements[home].cell
 	var cargo := _plan_cargo(home)
 	if cargo.is_empty():
 		return  # nothing to spare
 	var options: Array[int] = []
 	for i in _settlements.size():
-		if i != home and _roads.landmass[_settlements[i].cell] == _roads.landmass[from_cell]:
+		if i != home and not _settlements[i].ruined and _roads.landmass[_settlements[i].cell] == _roads.landmass[from_cell]:
 			options.append(i)
 	var here := _site(home)
 	options.sort_custom(func(a: int, b: int) -> bool: return here.distance_squared_to(_site(a)) < here.distance_squared_to(_site(b)))
@@ -146,6 +149,26 @@ func _depart(t: Dictionary) -> void:
 		return
 	_take_cargo(t, home, cargo)
 	_start(t, dest, path, false)
+
+
+## A trader whose home fell to ruin moves in with the nearest living town on
+## its landmass, or stays put if there is none.
+func _rehome(t: Dictionary) -> void:
+	var here := _site(t.home)
+	var landmass: int = _roads.landmass[_settlements[t.home].cell]
+	var best := -1
+	var best_dist := INF
+	for i in _settlements.size():
+		if _settlements[i].ruined or _roads.landmass[_settlements[i].cell] != landmass:
+			continue
+		var d := here.distance_squared_to(_site(i))
+		if d < best_dist:
+			best_dist = d
+			best = i
+	if best >= 0:
+		t.home = best
+		t.at = best
+	t.rest = REST_HOURS * 4.0
 
 
 func _start(t: Dictionary, dest: int, path: Array[int], returning: bool) -> void:

@@ -72,6 +72,8 @@ static func apply_daily(settlements: Array[Dictionary], total_days: int) -> Arra
 	var cold := (1.0 - season(total_days)) * 0.5  # 0 summer .. 1 winter
 	var events: Array[String] = []
 	for s in settlements:
+		if s.ruined:
+			continue
 		if not s.has("owed"):
 			s["owed"] = {}
 		var owed: Dictionary = s.owed
